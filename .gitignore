@@ -1,0 +1,25 @@
+# Private source material and generated data
+/sessions/
+/reference_transcripts/
+/work/
+/outputs/
+/models/
+/.cache/
+/.hf_cache/
+/.huggingface/
+/.codebase-memory/
+
+# Local environment and credentials
+/.venv/
+.env
+.env.*
+!.env.example
+
+# Python and test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/

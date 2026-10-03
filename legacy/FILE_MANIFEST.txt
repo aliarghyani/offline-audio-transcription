@@ -1,0 +1,28 @@
+ali-moshavere — audio chunk manifest
+===================================
+
+Original:
+ali-moshavere.m4a
+Duration: ~01:59:17
+
+Chunks (10 min, 3 sec overlap):
+01  ali-moshavere_part01_00-00-00_to_00-10-00.m4a
+02  ali-moshavere_part02_00-09-57_to_00-19-57.m4a
+03  ali-moshavere_part03_00-19-54_to_00-29-54.m4a
+04  ali-moshavere_part04_00-29-51_to_00-39-51.m4a
+05  ali-moshavere_part05_00-39-48_to_00-49-48.m4a
+06  ali-moshavere_part06_00-49-45_to_00-59-45.m4a
+07  ali-moshavere_part07_00-59-42_to_01-09-42.m4a
+08  ali-moshavere_part08_01-09-39_to_01-19-39.m4a
+09  ali-moshavere_part09_01-19-36_to_01-29-36.m4a
+10  ali-moshavere_part10_01-29-33_to_01-39-33.m4a
+11  ali-moshavere_part11_01-39-30_to_01-49-30.m4a
+12  ali-moshavere_part12_01-49-27_to_01-59-17.m4a
+
+Expected TXT names:
+replace .m4a with .txt
+
+Historical reference status:
+- part01: no complete final reference transcript available
+- part02-part12: reference transcripts available in reference_transcripts/
+- parts07 and 12 were once truncated during extraction and were re-extracted before the stored final reference versions were produced

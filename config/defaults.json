@@ -1,0 +1,29 @@
+{
+  "application": {
+    "sessions_dir": "sessions",
+    "work_dir": "work",
+    "outputs_dir": "outputs"
+  },
+  "pipeline": {
+    "chunk_duration_seconds": null,
+    "overlap_seconds": null,
+    "batch_size": null,
+    "worker_count": null
+  },
+  "ml": {
+    "whisperx_version": "3.8.6",
+    "language": "fa",
+    "asr_model": "large-v3",
+    "device": "cpu",
+    "compute_type": "int8",
+    "alignment_model": "jonatasgrosman/wav2vec2-large-xlsr-53-persian",
+    "diarization_model": "pyannote/speaker-diarization-community-1",
+    "num_speakers": 2,
+    "fill_nearest": false
+  },
+  "qa": {
+    "alignment_confidence_threshold": null,
+    "coverage_gap_seconds": null,
+    "tail_gap_seconds": null
+  }
+}

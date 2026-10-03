@@ -1,0 +1,2 @@
+# Keep the historical files byte-for-byte across Windows checkouts.
+/legacy/* -text
