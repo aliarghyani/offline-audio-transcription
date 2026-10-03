@@ -166,7 +166,7 @@ class AppConfig:
         }
 
 
-def load_config(root: Path | None = None) -> AppConfig:
+def load_config(root: Path | None = None, *, include_secrets: bool = True) -> AppConfig:
     project_root = (root or Path(__file__).resolve().parents[2]).resolve()
     config_path = project_root / "config" / "defaults.json"
     try:
@@ -221,5 +221,5 @@ def load_config(root: Path | None = None) -> AppConfig:
             coverage_gap_seconds=_optional_number(qa["coverage_gap_seconds"], "coverage gap"),
             tail_gap_seconds=_optional_number(qa["tail_gap_seconds"], "tail gap"),
         ),
-        secrets=SecretSettings.from_environment(),
+        secrets=SecretSettings.from_environment() if include_secrets else SecretSettings(),
     )

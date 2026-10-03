@@ -12,6 +12,7 @@ from session_pipeline import __version__
 from session_pipeline.artifacts import atomic_write_json, integrity_artifact
 from session_pipeline.config import ConfigurationError, load_config
 from session_pipeline.discovery import discover_sessions
+from session_pipeline.doctor import build_report, human_report
 from session_pipeline.fingerprint import stage_fingerprint
 from session_pipeline.integrity import inspect_audio
 from session_pipeline.models import SourceChangedError
@@ -19,6 +20,7 @@ from session_pipeline.models import SourceChangedError
 EXIT_SUCCESS = 0
 EXIT_INPUT_INVALID = 3
 EXIT_CONFIGURATION_ERROR = 4
+EXIT_ENVIRONMENT_INVALID = 5
 
 
 def _configure_console_streams() -> None:
@@ -51,6 +53,8 @@ def _parser() -> argparse.ArgumentParser:
     config_commands = config.add_subparsers(dest="config_command", required=True)
     show = config_commands.add_parser("show", help="show effective non-secret settings")
     show.add_argument("--json", action="store_true")
+    doctor = commands.add_parser("doctor", help="check ML software offline without loading models")
+    doctor.add_argument("--json", action="store_true")
     return parser
 
 
@@ -64,10 +68,14 @@ def run(argv: list[str] | None = None) -> int:
         )
         return EXIT_SUCCESS
     try:
-        config = load_config()
+        config = load_config(include_secrets=False)
     except ConfigurationError as error:
         print(f"Configuration error: {error}", file=sys.stderr)
         return EXIT_CONFIGURATION_ERROR
+    if args.command == "doctor":
+        report = build_report(config)
+        _emit(report if args.json else human_report(report), json_mode=args.json)
+        return EXIT_ENVIRONMENT_INVALID if report["software_status"] == "FAIL" else EXIT_SUCCESS
     if args.command == "config":
         public = config.public_dict()
         _emit(

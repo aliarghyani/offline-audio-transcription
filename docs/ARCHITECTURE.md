@@ -1,7 +1,8 @@
 # Pipeline architecture
 
-Phase 3A implements the integrity and contract foundation only. Future stages
-are documented here; they are not stub modules or available CLI commands.
+Phase 3A implements the integrity and contract foundation. Phase 3B adds the
+locked CPU software environment and offline `doctor` command. Future inference
+stages are documented here; they are not available CLI commands.
 
 ```text
 Integrity → Prepare → ASR → Alignment ─┐
@@ -16,7 +17,12 @@ derived media and a timeline under ignored `work/`. ASR will use WhisperX 3.8.6
 with faster-whisper/CTranslate2, Whisper large-v3, forced `fa`, CPU, and initial
 `int8` compute. Alignment will use a pinned Persian WhisperX model. Diarization
 will use `pyannote/speaker-diarization-community-1` with `num_speakers=2`.
-None of these ML dependencies is installed in Phase 3A.
+These software dependencies are installed and import-validated in Phase 3B.
+Whisper large-v3, Persian alignment and Community-1 diarization weights are not
+downloaded or loaded. The required WhisperX wheel's bundled VAD checkpoint is an
+explicitly approved package asset, installed but never loaded. External model
+downloads and model loading/inference did not occur in Phase 3B; see
+[ML runtime](ML_RUNTIME.md).
 
 ASR may use checkpointed chunks with absolute time offsets; duration, overlap,
 batch size, and workers remain unset until measured on valid input. Chunking is
@@ -35,6 +41,30 @@ stages should run sequentially, release process memory between stages, and use
 small measured batches. This is a strategy, not a claim that a model fits the
 currently available RAM. Model provisioning is separate from runtime; pinned
 model revisions and local cache checks prevent surprise downloads.
+
+## Validated software boundary (Phase 3B)
+
+The exact stack is documented in [ML runtime](ML_RUNTIME.md). PyTorch 2.8.0+cpu,
+torchaudio 2.8.0+cpu and torchvision 0.23.0+cpu come from an explicit official CPU
+index in pyproject.toml and uv.lock. Runtime verification requires a CPU build
+identifier, `torch.version.cuda is None`, CUDA unavailable, and zero CUDA devices.
+CTranslate2 reports CPU `int8` support; no Whisper model is created for this check.
+
+Integrity continues to resolve FFmpeg executables through PATH. TorchCodec 0.7.0
+uses a separate trusted Gyan FFmpeg Shared 7.1.1 user installation. The doctor
+checks its DLL families and registers the directory with Python's Windows DLL
+search API in fresh subprocesses. Copying arbitrary DLLs into site-packages or
+patching installed binaries is prohibited. A temporary synthetic PCM16 tone
+validates actual audio decoding, then is removed; private source audio is unused.
+
+The doctor imports software with HF/Transformers offline flags and pyannote
+telemetry disabled, removes token variables from child environments, and inspects
+WhisperX mappings/signatures/source without calling loaders. It reads no transcript
+content and does not obtain HF_TOKEN values. CLI configuration loads non-secret
+settings; the existing environment-only secret provider remains available to a
+future explicitly authorized stage. Doctor JSON preserves import diagnostics and
+distinguishes software PASS/FAIL from model-readiness WARN. It reports no models
+loaded; it does not claim that gated model access or memory fit has been tested.
 
 ## Resumability and invalidation
 
