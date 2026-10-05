@@ -114,9 +114,16 @@ environment. Model status never downloads. Verification hashes local files only.
 Current exit codes: `0` success (including doctor WARN), `2` CLI usage,
 `3` invalid input/discovery, `4` configuration error, and `5` doctor software
 failure, and `6` models incomplete/blocked/corrupt. Doctor exposes separate
-`software_ready`, `models_ready`, and `transcription_ready` fields. The damaged
-current source remains unsuitable for transcription. No ASR, alignment,
-diarization, speaker mapping or rendering command exists yet.
+`software_ready`, `models_ready`, and `transcription_ready` fields. At the Phase 3C
+checkpoint, the damaged source was unsuitable for transcription. No ASR, alignment,
+diarization, speaker mapping or rendering command existed in that Phase 3C snapshot.
+
+Current Phase 4D adds development-tested `diarize --plan/--status/--execute`
+surfaces and separate anonymous speaker-turn artifacts. Session 4 has a plan only;
+the gated diarization model remains unavailable. See [diarization](docs/DIARIZATION.md)
+for the whole-session clustering decision, offline runtime contract, manual
+provisioning/smoke/full commands, QA, and interruption behavior. No real diarization
+or speaker identity assignment was performed during development.
 
 ## Architecture
 

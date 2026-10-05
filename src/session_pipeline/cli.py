@@ -80,6 +80,20 @@ def _parser() -> argparse.ArgumentParser:
         "--fingerprint", help="existing alignment plan fingerprint (status/finalize)"
     )
     align.add_argument("--json", action="store_true")
+    diarize = commands.add_parser(
+        "diarize", help="local two-speaker diarization; default is plan only"
+    )
+    diarize.add_argument("session_id")
+    diarize_mode = diarize.add_mutually_exclusive_group()
+    diarize_mode.add_argument("--plan", action="store_true")
+    diarize_mode.add_argument("--execute", action="store_true")
+    diarize_mode.add_argument("--status", action="store_true")
+    diarize.add_argument("--smoke", action="store_true", help="separate first-180-second job")
+    diarize.add_argument("--aligned-fingerprint", help="pin the canonical full aligned parent")
+    diarize.add_argument(
+        "--fingerprint", help="existing diarization plan fingerprint (status only)"
+    )
+    diarize.add_argument("--json", action="store_true")
     models = commands.add_parser("models", help="manage pinned model files without inference")
     model_commands = models.add_subparsers(dest="model_command", required=True)
     for name in ("status", "provision", "verify"):
@@ -142,6 +156,50 @@ def run(argv: list[str] | None = None) -> int:
     except ConfigurationError as error:
         print(f"Configuration error: {error}", file=sys.stderr)
         return EXIT_CONFIGURATION_ERROR
+    if args.command == "diarize":
+        from session_pipeline import diarization
+
+        try:
+            if args.fingerprint and not args.status:
+                raise ValueError("--fingerprint requires --status")
+            if args.status:
+                report = diarization.status_report(
+                    config,
+                    args.session_id,
+                    smoke=args.smoke,
+                    aligned_fingerprint=args.aligned_fingerprint,
+                    fingerprint=args.fingerprint,
+                )
+            elif args.execute:
+                report = diarization.run_diarization(
+                    config,
+                    args.session_id,
+                    smoke=args.smoke,
+                    aligned_fingerprint=args.aligned_fingerprint,
+                )
+            else:
+                path, plan = diarization.make_plan(
+                    config,
+                    args.session_id,
+                    smoke=args.smoke,
+                    aligned_fingerprint=args.aligned_fingerprint,
+                )
+                report = diarization.status_report(
+                    config,
+                    args.session_id,
+                    aligned_fingerprint=plan["aligned_fingerprint"],
+                    fingerprint=path.parent.name,
+                )
+                report["state"] = "PLANNED" if report["state"] == "PENDING" else report["state"]
+            _emit(report if args.json else json.dumps(report, indent=2), json_mode=args.json)
+            return (
+                EXIT_INPUT_INVALID
+                if args.execute and not report["processing_complete"]
+                else EXIT_SUCCESS
+            )
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            print(f"Diarization failed: {type(error).__name__}", file=sys.stderr)
+            return EXIT_INPUT_INVALID
     if args.command == "align":
         from session_pipeline.alignment import (
             finalize_alignment,
