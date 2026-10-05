@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Local A/B transcript review</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">PERSIAN SESSION TRANSCRIPTION · LOCAL REVIEW</p>
+      <h1>Listen. Compare. Decide.</h1>
+      <p id="review-mode">Original A and retry B. Your choice is saved locally.</p>
+      <p id="progress" class="progress"></p>
+    </header>
+    <p id="message" role="status" aria-live="polite">Loading local review…</p>
+    <nav aria-label="Review navigation">
+      <button id="previous" type="button">Previous <kbd>P</kbd></button>
+      <label>Window <select id="window" aria-label="Review window"></select></label>
+      <button id="next" type="button">Next <kbd>N</kbd></button>
+    </nav>
+    <section aria-labelledby="interval-heading">
+      <h2 id="interval-heading">Replacement interval</h2>
+      <p id="interval" class="timestamp"></p>
+      <p id="flags" class="flags"></p>
+      <p id="audio-context"></p>
+      <audio id="audio" controls preload="metadata" aria-label="Local review audio with context"></audio>
+      <button id="play-target" type="button">Play target interval</button>
+    </section>
+    <div class="candidates">
+      <section class="candidate" aria-labelledby="a-heading">
+        <h2 id="a-heading">Candidate A <span>Original</span></h2>
+        <p class="hint">Original segments intersecting the target; A preserves the raw text.</p>
+        <div id="text-a" class="transcript" lang="fa" dir="rtl"></div>
+        <details><summary>Original ASR diagnostics</summary><pre id="diagnostics-a" dir="ltr"></pre></details>
+      </section>
+      <section class="candidate" aria-labelledby="b-heading">
+        <h2 id="b-heading">Candidate B <span>Retry target</span></h2>
+        <p id="candidate-source" class="hint"></p>
+        <p class="hint">Only the target words are eligible for replacement. Context is excluded.</p>
+        <div id="text-b" class="transcript" lang="fa" dir="rtl"></div>
+        <details><summary>Retry ASR diagnostics</summary><pre id="diagnostics-b" dir="ltr"></pre></details>
+        <details><summary>Padded retry context — listening reference only</summary>
+          <div id="context-b" class="transcript" lang="fa" dir="rtl"></div>
+        </details>
+      </section>
+    </div>
+    <section aria-labelledby="merge-heading">
+      <h2 id="merge-heading">Merge safety</h2>
+      <p id="merge-status"></p>
+      <aside id="boundary-note" class="boundary" aria-live="polite"></aside>
+    </section>
+    <section aria-labelledby="decision-heading">
+      <h2 id="decision-heading">Human candidate quality — your decision</h2>
+      <div class="decisions" role="group" aria-label="Choose a candidate">
+        <button id="use-a" data-choice="USE_A" type="button" aria-pressed="false">Use original A <kbd>A</kbd></button>
+        <button id="use-b" data-choice="USE_B" type="button" aria-pressed="false">Use retry B <kbd>B</kbd></button>
+        <button id="unclear" data-choice="UNCLEAR" type="button" aria-pressed="false">Unclear <kbd>U</kbd></button>
+        <button id="unreviewed" data-choice="UNREVIEWED" type="button" aria-pressed="false">Reset to unreviewed</button>
+      </div>
+      <p id="current-decision"></p>
+      <p class="hint">Choose B when it is more faithful to the audio. Boundary warnings do not prevent your choice. Unclear means you are unsure about the spoken content. Saving a decision does not merge a transcript.</p>
+    </section>
+    <footer>Runs on this computer. No external assets, analytics, cloud services or language model.</footer>
+  </main>
+</body>
+</html>

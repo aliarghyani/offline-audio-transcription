@@ -9,6 +9,13 @@ operations; explicit `qa retry --execute` launches a local pinned ASR worker.
 Alignment and diarization remain future CLI stages. Codex is development-only;
 local runtime has no cloud LLM dependency or automatic candidate replacement.
 
+Phase 4B adds [local human decisions and a reviewed lineage](HUMAN_REVIEW.md).
+The loopback review server uses the existing retry artifacts, validates all
+parents and exposes local playback. Human-approved target B spans are merged
+only when boundaries are unambiguous; UNCLEAR retains A with unresolved markers.
+Raw JSON/TXT are immutable. Reviewed outputs carry full provenance and remain
+pending explicit QA acceptance before alignment.
+
 ```text
 Integrity → Prepare → ASR → Alignment ─┐
              └──────→ Diarization ─────┤→ Attribution → QA → Render

@@ -73,6 +73,29 @@ def _parser() -> argparse.ArgumentParser:
     updates.add_argument("--json", action="store_true")
     qa = commands.add_parser("qa", help="offline ASR review and separate retry candidates")
     qa_commands = qa.add_subparsers(dest="qa_command", required=True)
+    review = qa_commands.add_parser("review", help="local human A/B review")
+    review_commands = review.add_subparsers(dest="review_command", required=True)
+    for name in ("build", "serve", "status"):
+        command = review_commands.add_parser(name)
+        command.add_argument("session_id")
+        command.add_argument("--retry-fingerprint")
+        command.add_argument("--json", action="store_true")
+        if name == "serve":
+            command.add_argument("--port", type=int, default=8765)
+            command.add_argument("--open", action="store_true")
+    merge = qa_commands.add_parser("merge", help="merge completed human decisions into new lineage")
+    merge.add_argument("session_id")
+    merge.add_argument("--retry-fingerprint")
+    merge.add_argument("--json", action="store_true")
+    recovery = qa_commands.add_parser("recover", help="offline retry word recovery")
+    recovery.add_argument("session_id")
+    recovery.add_argument("--retry-fingerprint")
+    recovery.add_argument(
+        "--auto-prefer-b",
+        action="store_true",
+        help="explicitly apply automatic B choices and create reviewed output",
+    )
+    recovery.add_argument("--json", action="store_true")
     for name in ("asr", "status", "retry"):
         command = qa_commands.add_parser(name)
         command.add_argument("session_id")
@@ -107,6 +130,34 @@ def run(argv: list[str] | None = None) -> int:
         from session_pipeline.asr_quality import create_review, load_canonical, session_paths
 
         try:
+            if args.qa_command == "recover":
+                from session_pipeline.retry_recovery import auto_merge, build_recovery
+
+                report = build_recovery(config, args.session_id, args.retry_fingerprint)
+                if args.auto_prefer_b:
+                    report.update(auto_merge(config, args.session_id, args.retry_fingerprint))
+                _emit(report if args.json else json.dumps(report, indent=2), json_mode=args.json)
+                return EXIT_SUCCESS
+            if args.qa_command == "review":
+                from session_pipeline.human_review import build_bundle, review_status
+
+                if args.review_command == "serve":
+                    from session_pipeline.review_server import serve_review
+
+                    serve_review(
+                        config, args.session_id, args.retry_fingerprint, args.port, args.open
+                    )
+                    return EXIT_SUCCESS
+                operation = build_bundle if args.review_command == "build" else review_status
+                report = operation(config, args.session_id, args.retry_fingerprint)
+                _emit(report if args.json else json.dumps(report, indent=2), json_mode=args.json)
+                return EXIT_SUCCESS
+            if args.qa_command == "merge":
+                from session_pipeline.review_merge import merge_review
+
+                report = merge_review(config, args.session_id, args.retry_fingerprint)
+                _emit(report if args.json else json.dumps(report, indent=2), json_mode=args.json)
+                return EXIT_SUCCESS
             if args.qa_command == "retry":
                 from session_pipeline.asr_retry import launch_worker, make_plan
 
@@ -165,7 +216,10 @@ def run(argv: list[str] | None = None) -> int:
             _emit(report if args.json else json.dumps(report, indent=2), json_mode=args.json)
             return EXIT_SUCCESS
         except (OSError, ValueError, KeyError, TypeError) as error:
-            print(f"QA failed: {type(error).__name__}", file=sys.stderr)
+            from session_pipeline.human_review import ReviewError
+
+            detail = str(error) if isinstance(error, ReviewError) else type(error).__name__
+            print(f"QA failed: {detail}", file=sys.stderr)
             return EXIT_INPUT_INVALID
     if args.command == "models":
         try:

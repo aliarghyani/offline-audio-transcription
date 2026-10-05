@@ -12,6 +12,12 @@ Only `qa retry --execute` starts local retry inference. Runtime requires no
 Codex session, OpenAI API, LLM API, cloud prompts or ChatGPT tokens.
 No psychological or therapy-content interpretation belongs in this repository.
 
+Phase 4B adds a [local human A/B review UI and safe reviewed merge](docs/HUMAN_REVIEW.md).
+Start with `session-pipeline qa review build <session-id>`, then
+`session-pipeline qa review serve <session-id> --port 0 --open`. Decisions persist
+locally. `qa merge` requires completed review and writes a separate reviewed
+lineage; original raw transcripts are preserved.
+
 ## Private data boundary
 
 Put future recordings in `sessions/` and leave each original file unchanged.
