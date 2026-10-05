@@ -216,7 +216,8 @@ def test_interrupted_running_unit_is_resumed(reviewed, project_config):
             project_config, sid, engine_factory=lambda _: interrupted, extractor=fake_extract
         )
     cp = read_artifact(a.checkpoint_path(p, plan["units"][0]))
-    assert cp["status"] == "RUNNING"
+    assert cp["status"] == "INTERRUPTED"
+    assert a.status_report(project_config, sid)["unit_status_counts"]["INTERRUPTED"] == 1
     assert execute(project_config, sid)["full_alignment_complete"]
 
 
@@ -245,6 +246,7 @@ def test_partial_alignment_preserves_unaligned_tokens_and_score_meaning(reviewed
     # Last unit has a second fully aligned segment, so a partial last word is retained safely.
     assert report["unaligned_word_count"] == 3 and report["qa_counts"]["PARTIAL_ALIGNMENT"] == 3
     assert report["full_alignment_complete"]
+    assert report["partial_units"] == 3 and report["succeeded_units"] == 0
     doc = read_artifact(Path(report["aligned_json"]))
     w = doc["segments"][0]["words"][-1]
     assert w["word"] == "دوم" and w["start"] is None and w["status"] == "UNALIGNED_WORD"
@@ -485,3 +487,207 @@ def test_global_order_error_blocks_completion_even_when_unit_checkpoints_exist(
     results[3]["words"][0].update(start=300, end=301)
     with pytest.raises(ValueError, match="global alignment timestamp order"):
         a.validate_coverage(plan, document, results)
+
+
+def isolated_failure(originals, unit, clip):
+    result = fake_engine(originals, unit, clip)
+    if unit["index"] == 0:
+        result[0] = {"words": []}
+    return result
+
+
+def legacy_content_checkpoint(config, sid):
+    report = a.run_alignment(
+        config, sid, engine_factory=lambda _: isolated_failure, extractor=fake_extract
+    )
+    Path(report["aligned_json"]).unlink()
+    p, plan = a.make_plan(config, sid)
+    cp_path = a.checkpoint_path(p, plan["units"][0])
+    cp = read_artifact(cp_path)
+    cp.update(status="FAILED", failure_code="ReviewError")
+    cp.pop("execution_completed", None)
+    for segment in cp["segments"]:
+        segment.pop("alignment_status", None)
+        segment["alignment_diagnostics"].pop("failure_reason", None)
+    atomic_write_json(cp_path, seal_artifact(cp))
+    return p, plan, cp_path
+
+
+def test_isolated_content_failure_is_partial_with_complete_canonical_coverage(
+    reviewed, project_config
+):
+    sid, path, source = reviewed
+    raw = path.parents[2] / "transcript.raw.fa.json"
+    immutable = [path, path.with_suffix(".txt"), source, raw, raw.with_suffix(".txt")]
+    before = {p: (sha256_file(p), p.stat().st_mtime_ns) for p in immutable}
+    report = a.run_alignment(
+        project_config, sid, engine_factory=lambda _: isolated_failure, extractor=fake_extract
+    )
+    assert report["succeeded_units"] == 2 and report["partial_units"] == 1
+    assert report["failed_units"] == 0 and report["completed_units"] == 3
+    assert report["mode_processing_complete"] and report["full_alignment_complete"]
+    assert report["coverage_validation_pass"] and report["alignment_has_warnings"]
+    assert report["qa_counts"]["ALIGNMENT_FAILED"] == 1
+    assert report["qa_counts"]["UNALIGNED_WORD"] == 1 and report["unaligned_word_count"] == 2
+    doc = read_artifact(Path(report["aligned_json"]))
+    p, plan = a.make_plan(project_config, sid)
+    assert [s["reviewed_segment_id"] for s in doc["segments"]] == [
+        key for u in plan["units"] for key in u["segment_ids"]
+    ]
+    originals = read_artifact(path)["segments"]
+    assert len(doc["segments"]) == len(originals)
+    for aligned, original in zip(doc["segments"], originals, strict=True):
+        assert aligned["text"].encode("utf-8") == original["text"].encode("utf-8")
+        assert (aligned["start"], aligned["end"]) == (original["start"], original["end"])
+    failed = doc["segments"][0]
+    assert failed["alignment_status"] == "ALIGNMENT_FAILED"
+    assert failed["alignment_diagnostics"]["failure_reason"] == "LEXICAL_MAPPING_FAILED"
+    assert all(
+        w["start"] is None and w["end"] is None and w["score"] is None for w in failed["words"]
+    )
+    assert failed["review_origin"] == originals[0].get("review_origin")
+    a.validate_coverage(plan, read_artifact(path), doc["segments"])
+    assert doc["qa"]["partial_units"] == 1 and doc["qa"]["alignment_has_warnings"]
+    assert before == {p: (sha256_file(p), p.stat().st_mtime_ns) for p in immutable}
+
+
+def test_legacy_content_finalization_reuses_checkpoints_without_inference_or_network(
+    reviewed, project_config, monkeypatch
+):
+    sid, path, _ = reviewed
+    p, plan, failed_path = legacy_content_checkpoint(project_config, sid)
+    old = failed_path.read_bytes()
+    old_checksum = read_artifact(failed_path)["artifact_checksum"]
+    successful = {
+        a.checkpoint_path(p, u): a.checkpoint_path(p, u).read_bytes() for u in plan["units"][1:]
+    }
+    before = (path.read_bytes(), path.with_suffix(".txt").read_bytes())
+    real_import = builtins.__import__
+
+    def guard(name, *args, **kwargs):
+        if name.split(".")[0] in {
+            "torch",
+            "torchaudio",
+            "whisperx",
+            "transformers",
+            "faster_whisper",
+            "openai",
+            "anthropic",
+        }:
+            raise AssertionError("model or LLM import forbidden")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guard)
+    monkeypatch.setattr(a, "make_plan", Mock(side_effect=AssertionError("no new plan")))
+    monkeypatch.setattr(a, "LocalAligner", Mock(side_effect=AssertionError("no model")))
+    monkeypatch.setattr(a, "extract_clip", Mock(side_effect=AssertionError("no decode")))
+    with deny_network():
+        status = a.status_report(project_config, sid, plan_path=p)
+        assert status["partial_units"] == 1 and status["full_alignment_complete"]
+        assert failed_path.read_bytes() == old  # Status is read-only.
+        report = a.finalize_alignment(project_config, sid, plan_path=p)
+        artifact = Path(report["aligned_json"])
+        canonical = artifact.read_bytes()
+        assert a.finalize_alignment(project_config, sid, plan_path=p)["full_alignment_complete"]
+        assert artifact.read_bytes() == canonical
+    recovered = read_artifact(failed_path)
+    assert recovered["status"] == "PARTIAL" and recovered["attempt"] == 1
+    assert recovered["recovered_from_checksum"] == old_checksum
+    assert (p.parent / "recovery" / f"{old_checksum}.json").read_bytes() == old
+    assert successful == {cp: cp.read_bytes() for cp in successful}
+    assert before == (path.read_bytes(), path.with_suffix(".txt").read_bytes())
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["execution", "engine_diagnostic", "coverage", "timestamp", "corrupt", "model_parent"],
+)
+def test_finalization_never_promotes_infrastructure_or_invalid_results(
+    reviewed, project_config, failure
+):
+    sid, _, _ = reviewed
+    p, plan, cp_path = legacy_content_checkpoint(project_config, sid)
+    cp = read_artifact(cp_path)
+    if failure == "execution":
+        cp["failure_code"] = "RuntimeError"
+    elif failure == "engine_diagnostic":
+        cp["segments"][0]["alignment_diagnostics"]["engine_failure_code"] = "MemoryError"
+    elif failure == "coverage":
+        cp["segments"].pop()
+    elif failure == "timestamp":
+        cp["segments"][1]["words"][0]["start"] = -10
+    elif failure == "model_parent":
+        cp["parent_checksums"]["model_lock"] = "0" * 64
+    atomic_write_json(cp_path, seal_artifact(cp))
+    if failure == "corrupt":
+        cp_path.write_bytes(b"invalid json")
+    before = cp_path.read_bytes()
+    report = a.finalize_alignment(project_config, sid, plan_path=p)
+    assert not report["mode_processing_complete"] and not report["coverage_validation_pass"]
+    assert report["aligned_json"] is None and cp_path.read_bytes() == before
+    assert not (p.parent / "recovery").exists()
+
+
+def test_stale_running_status_is_interrupted_and_live_worker_remains_running(
+    reviewed, project_config
+):
+    sid, _, _ = reviewed
+    completed = execute(project_config, sid)
+    # Simulate interruption before canonical publication, not damage to a
+    # published lineage (which must still be refused).
+    Path(completed["aligned_json"]).unlink()
+    p, plan = a.make_plan(project_config, sid)
+    cp_path = a.checkpoint_path(p, plan["units"][0])
+    cp = read_artifact(cp_path)
+    cp.update(status="RUNNING", segments=[])
+    atomic_write_json(cp_path, seal_artifact(cp))
+    before = cp_path.read_bytes()
+    with a.exclusive_lock(project_config.application.work_path / sid / "alignment/.worker.lock"):
+        assert a.status_report(project_config, sid)["unit_status_counts"]["RUNNING"] == 1
+    assert a.status_report(project_config, sid)["unit_status_counts"]["INTERRUPTED"] == 1
+    assert cp_path.read_bytes() == before
+    assert not a.finalize_alignment(project_config, sid, plan_path=p)["mode_processing_complete"]
+    assert execute(project_config, sid)["full_alignment_complete"]
+
+
+def test_complete_partial_resume_skips_all_model_execution(reviewed, project_config):
+    sid, _, _ = reviewed
+    first = a.run_alignment(
+        project_config, sid, engine_factory=lambda _: isolated_failure, extractor=fake_extract
+    )
+    artifact = Path(first["aligned_json"]).read_bytes()
+    report = a.run_alignment(
+        project_config,
+        sid,
+        engine_factory=Mock(side_effect=AssertionError("partial must not retry")),
+        extractor=Mock(side_effect=AssertionError("no decode")),
+    )
+    assert report["partial_units"] == 1 and report["full_alignment_complete"]
+    assert Path(report["aligned_json"]).read_bytes() == artifact
+
+
+def test_finalize_cli_uses_existing_exact_plan(reviewed, project_config, monkeypatch, capsys):
+    sid, _, _ = reviewed
+    p, plan, _ = legacy_content_checkpoint(project_config, sid)
+    monkeypatch.setattr("session_pipeline.cli.load_config", lambda **_: project_config)
+    monkeypatch.setattr(a, "run_alignment", Mock(side_effect=AssertionError("no inference")))
+    assert (
+        run(["align", sid, "--finalize", "--fingerprint", plan["stage_fingerprint"], "--json"]) == 0
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["partial_units"] == 1 and report["aligned_json"]
+
+
+def test_adapter_execution_exception_propagates_as_failed_unit(tmp_path):
+    clip = tmp_path / "fixture.wav"
+    wav(clip, 2)
+    module = SimpleNamespace(
+        nltk_load=Mock(),
+        nltk=SimpleNamespace(download=Mock()),
+        logger=SimpleNamespace(disabled=False),
+        align=Mock(side_effect=MemoryError("private")),
+    )
+    engine = a.LocalAligner.__new__(a.LocalAligner)
+    engine.wx, engine.model, engine.metadata = module, object(), {}
+    with pytest.raises(MemoryError):
+        engine([seg(0, 2, "one two")], {"decoded_interval": [0, 2]}, clip)

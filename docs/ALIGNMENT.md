@@ -24,15 +24,19 @@ uv run --no-sync session-pipeline align $session --execute --smoke --reviewed-fi
 # Manual full execution. Rerun exactly this command to resume.
 uv run --no-sync session-pipeline align $session --execute --reviewed-fingerprint $reviewed --json
 
+# Finalize existing results only; no model, decoding, or retries.
+uv run --no-sync session-pipeline align $session --finalize --fingerprint <alignment-fingerprint> --json
+
 # Read-only full-run status. Add --smoke for smoke status.
 uv run --no-sync session-pipeline align $session --status --reviewed-fingerprint $reviewed --json
 ```
 
-`--plan`, `--execute`, and `--status` are mutually exclusive. Only `--execute`
+`--plan`, `--execute`, `--status`, and `--finalize` are mutually exclusive. Only `--execute`
 loads the real model or decodes derived audio. An omitted reviewed fingerprint
 selects the validated `reviewed/latest.json` pointer; the commands above pin the
 accepted lineage. Status can select an exact existing plan using
-`--status --fingerprint <alignment-fingerprint>`.
+`--status --fingerprint <alignment-fingerprint>`. The same exact fingerprint can
+be used with `--finalize`; finalization never creates a plan or runs inference.
 Progress is written to stderr; `--json` stdout stays machine-readable. Failed or
 incomplete execution returns exit code 3. Process exit alone is never completion.
 
@@ -91,8 +95,11 @@ outputs/<session>/aligned/smoke/<fingerprint>/transcript.aligned.fa.json
 ```
 
 Checkpoints are atomically sealed and bind the reviewed, plan, model-lock and unit
-checksums. A valid `SUCCEEDED` unit is skipped; `FAILED` and interrupted `RUNNING`
-units are retried. Tampered or stale checkpoints are refused, not silently reused.
+checksums. Valid `SUCCEEDED` and recoverable `PARTIAL` units are skipped. `FAILED` and
+`INTERRUPTED` units are retried only by explicit `--execute`. A caught
+KeyboardInterrupt/SystemExit seals an `INTERRUPTED` checkpoint. Read-only status
+reports stale `RUNNING` as `INTERRUPTED` when the OS worker lock is unheld, and
+keeps a live worker `RUNNING`. Tampered or stale checkpoints are refused, not silently reused.
 Attempts, cumulative unit wall time, processed audio seconds, statuses and QA
 diagnostics are recorded. Status derives actual completion from checkpoint files,
 not the potentially stale progress snapshot.
@@ -127,7 +134,7 @@ Failed segments preserve all authoritative tokens as untimed in checkpoints.
 Partial alignment can complete processing with explicit untimed words; fatal
 failures or invalid bounds/order keep the unit failed and block canonical output.
 
-The final validator requires exact segment partition, every unit succeeded,
+The final validator requires exact segment partition, every unit `SUCCEEDED` or `PARTIAL`,
 source-duration bounds, nondecreasing aligned word starts within/across units,
 and beginning/tail ownership. Any global coverage/order failure blocks publishing.
 The canonical output records reviewed parent checksum, source SHA-256, model and
@@ -140,7 +147,7 @@ verified. Consult `unaligned_word_count` and QA flags before later attribution o
 diarization. Raw/reviewed pairs are hashed and rechecked before publication, and
 their files remain untouched. Identical completed reruns preserve the aligned file.
 
-## Development boundary
+## Original Phase 4C development boundary
 
 Phase 4C tests use generated synthetic audio, fake model interfaces, and injected
 alignment results. They test the adapter call contract without loading real
@@ -148,3 +155,71 @@ weights. Session 4 receives a **plan only**. Real model/runtime accuracy, memory
 and wall time must be established by the user's manual smoke. No real alignment,
 ASR, diarization, LLM invocation, package install or model download is authorized
 inside the development task.
+
+
+## Phase 4C.1: completion with recoverable alignment warnings
+
+`SUCCEEDED` means every owned segment and word was aligned acceptably. `PARTIAL`
+means execution completed and every owned segment is represented, with recoverable
+content alignment failures or missing word timings. `FAILED` remains an execution,
+model, infrastructure, invalid timestamp, or coverage failure. WhisperX execution
+exceptions propagate to the unit failure handler; they are not content warnings.
+Suspicious durations remain visible QA warnings even when timing is available.
+
+`completed_units` includes `SUCCEEDED` and `PARTIAL`; `succeeded_units`,
+`partial_units`, `failed_units`, and `unit_status_counts` expose the distinction.
+`mode_processing_complete`, `full_alignment_complete`, and
+`coverage_validation_pass` require complete deterministic coverage and valid
+structure, not 100% forced-aligned words. `alignment_has_warnings` explicitly
+indicates non-ALIGNED QA. Canonical QA retains all existing counts and the exact
+unaligned word count. Completion describes processing, not scientific acceptance.
+
+For failed segments, unchanged reviewed text, segment ID, reviewed start/end,
+review origin, and parent lineage are retained. `status` and `alignment_status`
+are `ALIGNMENT_FAILED`, with machine-readable `alignment_diagnostics.failure_reason`.
+Unaligned words retain text and have null start/end/score; segment bounds are
+reviewed fallback timing, not invented forced-alignment word timing. Later
+speaker processing may use aligned word timestamps where available and reviewed
+segment bounds where alignment failed. No speaker assignment happens here.
+
+Legacy `FAILED` checkpoints can be recovered only for the old `ReviewError`
+post-validation content rejection: complete owned results, valid timestamps,
+finished execution, processed audio coverage, at least one failed alignment, and
+no execution exception diagnostics. Finalization refuses incomplete, corrupt,
+execution-failed, or invalid-coverage results. Before reclassification it archives
+the original sealed checkpoint under `recovery/<old-checksum>.json` and records
+`recovered_from_checksum`, the recovery reason, and the legacy failure code.
+Attempts, inference results, plan fingerprint, parents, and successful checkpoint
+bytes are retained. Status classifies in memory and never performs migration.
+Existing old successful checkpoints with missing word timings are reported as
+`PARTIAL` without changing their bytes.
+
+`--finalize` consumes only existing checkpoints under the session worker lock,
+validates reviewed/source/plan lineage and complete coverage, archives/reclassifies
+eligible legacy content failures, and publishes `transcript.aligned.fa.json` plus
+updated progress. It denies network access and never decodes audio, loads a model,
+uses ASR/diarization/LLMs, or retries a failed unit. Repeating it is idempotent for
+the canonical artifact. A real failed unit still blocks canonical publication.
+
+Canonical segment timing is explicitly labeled `segment_timing_source=REVIEWED_PARENT`
+with `reviewed_interval`; unavailable aligned word timings remain null. QA exposes
+both segment flag counts and word flag counts, including zero counts. Session 4's
+two failed segments have persisted lexical-mapping failures but no engine exception.
+The exact returned token lists were not saved, so the lower-level mismatch cause
+is UNKNOWN; finalization does not rerun inference to obtain it.
+
+Phase 4C.1 finalized the existing Session 4 fingerprint
+`4ba81b10c2e0daff7708ce89c7bcb0b504c8935702d48ee2a4337063554e96f9`
+from persisted checkpoints, without inference. All 2810 reviewed segments are
+present. Units: 22 `SUCCEEDED`, 2 `PARTIAL`, 0 `FAILED`. Segment QA remains
+2808 `ALIGNED`, 2 `ALIGNMENT_FAILED`, 2 `UNALIGNED_WORD` flags, and 47
+`SUSPICIOUS_WORD_DURATION` flags. Word-level counts are 4 unaligned words and
+48 suspicious-duration flags; these differ from the segment-level flag counts.
+Coverage, processing completeness, full alignment completion, warning visibility,
+and canonical idempotence passed. Reviewed/raw/audio hashes and modification times
+were unchanged; all 22 successful checkpoint files retained their original bytes.
+Both reclassified checkpoint originals were archived, and their attempt counts
+remain 2. `uv lock --check --offline`, full pytest (166 passed), and
+`python -m ruff check .` passed. Detailed private verification evidence is in
+`work/<session>/alignment/<fingerprint>/partial-finalization-verification.json`;
+transcripts and checkpoints remain ignored local data.

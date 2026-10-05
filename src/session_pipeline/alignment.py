@@ -65,6 +65,8 @@ QA_CODES = (
     "TIMESTAMP_ORDER_ERROR",
     "SUSPICIOUS_WORD_DURATION",
 )
+TERMINAL_COMPLETE = {"SUCCEEDED", "PARTIAL"}
+CONTENT_FAILURE_CODES = {None, "NO_ALIGNMENT_PATH", "NO_ALIGNABLE_CHARACTERS"}
 
 
 def digest(value):
@@ -375,11 +377,15 @@ def normalize_segment(original, returned, unit, segment_index, segment_id, durat
         "review_origin": copy.deepcopy(original.get("review_origin")),
         "words": words,
         "status": status,
+        "alignment_status": status,
         "qa_flags": sorted(issues),
         "alignment_unit_id": unit["unit_id"],
         "alignment_diagnostics": {
             "lexical_mapping_failed": mismatch,
             "engine_failure_code": returned.get("failure_code"),
+            "failure_reason": ("LEXICAL_MAPPING_FAILED" if mismatch else "NO_ALIGNED_WORDS")
+            if status == "ALIGNMENT_FAILED"
+            else None,
         },
     }
 
@@ -397,6 +403,7 @@ def validate_segments(segments, reviewed, unit, duration):
             s["text"] == original["text"]
             and s["start"] == original["start"]
             and s["end"] == original["end"]
+            and s.get("review_origin") == original.get("review_origin")
             and s["alignment_unit_id"] == unit["unit_id"],
             "checkpoint rewrites reviewed text or timestamps",
         )
@@ -404,10 +411,25 @@ def validate_segments(segments, reviewed, unit, duration):
             [w["word"] for w in s["words"]] == [w for w, _, _ in tokens(original["text"])],
             "checkpoint word ownership changed",
         )
+        require(
+            s["status"] in {"ALIGNED", "PARTIAL_ALIGNMENT", "ALIGNMENT_FAILED"}
+            and s.get("alignment_status", s["status"]) == s["status"],
+            "invalid segment alignment status",
+        )
+        if s["status"] == "ALIGNED":
+            require(
+                all(w["status"] == "ALIGNED" for w in s["words"]),
+                "aligned segment hides unaligned words",
+            )
         for w in s["words"]:
             a, b = w["start"], w["end"]
             if a is None and b is None:
+                require(w["status"] == "UNALIGNED_WORD", "unaligned word status mismatch")
                 continue
+            require(
+                w["status"] == "ALIGNED" and s["status"] != "ALIGNMENT_FAILED",
+                "failed alignment contains invented aligned timing",
+            )
             require(
                 number(a)
                 and number(b)
@@ -441,16 +463,107 @@ def read_checkpoint(path, plan, unit, reviewed):
         and cp.get("model") == MODEL
         and cp.get("parent_checksums") == checkpoint_identity(plan, unit)
         and cp.get("unit") == unit
-        and cp.get("status") in {"RUNNING", "FAILED", "SUCCEEDED"},
+        and cp.get("status") in {"RUNNING", "INTERRUPTED", "FAILED", "SUCCEEDED", "PARTIAL"},
         "alignment checkpoint identity mismatch",
     )
-    if cp["status"] == "SUCCEEDED":
+    if cp["status"] in TERMINAL_COMPLETE:
         validate_segments(cp["segments"], reviewed, unit, plan["duration_seconds"])
-        require(
-            not any(s["status"] == "ALIGNMENT_FAILED" for s in cp["segments"]),
-            "successful checkpoint hides alignment failure",
-        )
+        outcome = segment_outcome(cp["segments"])
+        if cp["status"] == "SUCCEEDED":
+            require(
+                not any(s["status"] == "ALIGNMENT_FAILED" for s in cp["segments"]),
+                "successful checkpoint hides alignment failure",
+            )
+        else:
+            require(outcome == "PARTIAL", "partial checkpoint has no recoverable warnings")
     return cp
+
+
+def segment_outcome(segments):
+    """Content warnings are terminal; engine exceptions never become warnings."""
+    require(
+        all(
+            s["alignment_diagnostics"].get("engine_failure_code") in CONTENT_FAILURE_CODES
+            for s in segments
+        ),
+        "segment engine execution failed",
+    )
+    return (
+        "PARTIAL"
+        if any(
+            s["status"] != "ALIGNED" or any(w["status"] == "UNALIGNED_WORD" for w in s["words"])
+            for s in segments
+        )
+        else "SUCCEEDED"
+    )
+
+
+def checkpoint_state(cp, plan, unit, reviewed):
+    """Recognize only the old, post-validation content rejection for recovery."""
+    if cp["status"] == "SUCCEEDED":
+        # Older successful checkpoints could contain unaligned words. Reuse their
+        # bytes while reporting their now-explicit warning state.
+        return segment_outcome(cp["segments"])
+    if cp["status"] == "FAILED" and cp.get("failure_code") == "ReviewError":
+        try:
+            validate_segments(cp["segments"], reviewed, unit, plan["duration_seconds"])
+            if (
+                cp.get("finished_at")
+                and cp.get("processed_audio_seconds", 0)
+                >= unit["decoded_interval"][1] - unit["decoded_interval"][0]
+                and any(s["status"] == "ALIGNMENT_FAILED" for s in cp["segments"])
+                and segment_outcome(cp["segments"]) == "PARTIAL"
+            ):
+                return "PARTIAL"
+        except (ValueError, KeyError, TypeError):
+            pass
+    return cp["status"]
+
+
+def alignment_worker_active(config, sid):
+    lock = config.application.work_path / sid / "alignment/.worker.lock"
+    if not lock.exists():
+        return False
+    try:
+        with exclusive_lock(lock):
+            return False
+    except OSError:
+        return True
+
+
+def recover_checkpoint(path, cp, plan, unit, reviewed):
+    if cp["status"] != "FAILED" or checkpoint_state(cp, plan, unit, reviewed) != "PARTIAL":
+        return cp
+    # Retain the sealed original and its checksum without replacing any inference result.
+    archive = path.parent.parent / "recovery" / f"{cp['artifact_checksum']}.json"
+    require(
+        archive.resolve().is_relative_to(path.parent.parent.resolve()),
+        "checkpoint recovery archive escapes lineage",
+    )
+    if archive.exists():
+        require(read_artifact(archive) == cp, "checkpoint recovery archive changed")
+    else:
+        atomic_write_json(archive, cp)
+    recovered = copy.deepcopy(cp)
+    recovered.update(
+        status="PARTIAL",
+        execution_completed=True,
+        recovered_from_checksum=cp["artifact_checksum"],
+        recovery_reason="LEGACY_CONTENT_FAILURE_RECLASSIFIED",
+        legacy_failure_code=recovered.pop("failure_code", None),
+    )
+    for segment in recovered["segments"]:
+        if segment["status"] == "ALIGNMENT_FAILED":
+            segment["alignment_status"] = "ALIGNMENT_FAILED"
+            diagnostics = segment["alignment_diagnostics"]
+            diagnostics["failure_reason"] = (
+                "LEXICAL_MAPPING_FAILED"
+                if diagnostics["lexical_mapping_failed"]
+                else "NO_ALIGNED_WORDS"
+            )
+    recovered = seal_artifact(recovered)
+    atomic_write_json(path, recovered)
+    return recovered
 
 
 def status_report(config, sid, *, smoke=False, reviewed_fingerprint=None, plan_path=None):
@@ -476,7 +589,10 @@ def status_report(config, sid, *, smoke=False, reviewed_fingerprint=None, plan_p
             "status": "NOT_PLANNED",
             "planned_unit_count": 0,
             "completed_units": 0,
+            "succeeded_units": 0,
+            "partial_units": 0,
             "failed_units": 0,
+            "alignment_has_warnings": False,
             "full_alignment_complete": False,
             "models_loaded": False,
         }
@@ -489,6 +605,8 @@ def status_report(config, sid, *, smoke=False, reviewed_fingerprint=None, plan_p
     validate_plan(config, plan, path, reviewed, integrity, spec)
     counts = Counter()
     qa = Counter()
+    word_qa = Counter()
+    segment_states = Counter()
     known = []
     audio, processed, count, elapsed = 0.0, 0.0, 0, 0.0
     unaligned = 0
@@ -500,9 +618,12 @@ def status_report(config, sid, *, smoke=False, reviewed_fingerprint=None, plan_p
         if cp_path.exists():
             try:
                 cp = read_checkpoint(cp_path, plan, unit, reviewed)
-                state = cp["status"]
+                state = checkpoint_state(cp, plan, unit, reviewed)
+                if state == "RUNNING" and not alignment_worker_active(config, sid):
+                    state = "INTERRUPTED"
             except (ValueError, KeyError, TypeError):
                 state = "INVALID_CHECKPOINT"
+                cp = None
         counts[state] += 1
         known.append({"unit_id": unit["unit_id"], "status": state})
         if cp:
@@ -510,12 +631,15 @@ def status_report(config, sid, *, smoke=False, reviewed_fingerprint=None, plan_p
             processed += cp.get("processed_audio_seconds", 0)
             for s in cp.get("segments", []):
                 qa.update(s["qa_flags"])
+                segment_states[s["status"]] += 1
+                for word in s["words"]:
+                    word_qa.update(word["qa_flags"])
                 unaligned += sum(w["status"] == "UNALIGNED_WORD" for w in s["words"])
-        if state == "SUCCEEDED":
+        if state in TERMINAL_COMPLETE:
             count += len(unit["segment_indices"])
             audio += unit["ownership_interval"][1] - unit["ownership_interval"][0]
             segments.extend(cp["segments"])
-    complete = counts["SUCCEEDED"] == len(plan["units"])
+    complete = counts["SUCCEEDED"] + counts["PARTIAL"] == len(plan["units"])
     ordered = True
     coverage_errors = []
     if complete:
@@ -536,16 +660,29 @@ def status_report(config, sid, *, smoke=False, reviewed_fingerprint=None, plan_p
         "mode": plan["configuration"]["mode"],
         "planned_unit_count": len(plan["units"]),
         "planned_audio_seconds": plan["planned_audio_seconds"],
-        "completed_units": counts["SUCCEEDED"],
+        "completed_units": counts["SUCCEEDED"] + counts["PARTIAL"],
+        "succeeded_units": counts["SUCCEEDED"],
+        "partial_units": counts["PARTIAL"],
         "failed_units": counts["FAILED"],
-        "unit_status_counts": dict(counts),
+        "unit_status_counts": {key: counts[key] for key in ("SUCCEEDED", "PARTIAL", "FAILED")}
+        | {
+            key: value
+            for key, value in counts.items()
+            if key not in {"SUCCEEDED", "PARTIAL", "FAILED"}
+        },
         "units": known,
         "completed_owned_audio_seconds": audio,
         "processed_audio_seconds": processed,
         "owned_segment_count": plan["owned_segment_count"],
         "completed_segment_count": count,
         "unaligned_word_count": unaligned,
-        "qa_counts": dict(qa),
+        "qa_counts": {code: qa[code] for code in QA_CODES},
+        "word_qa_counts": {code: word_qa[code] for code in QA_CODES},
+        "segment_status_counts": {
+            code: segment_states[code]
+            for code in ("ALIGNED", "PARTIAL_ALIGNMENT", "ALIGNMENT_FAILED")
+        },
+        "alignment_has_warnings": any(code != "ALIGNED" and n for code, n in qa.items()),
         "wall_seconds": elapsed,
         "mode_processing_complete": complete and ordered,
         "coverage_validation_pass": complete and ordered,
@@ -684,28 +821,19 @@ class LocalAligner:
                     "end": original["end"] - unit["decoded_interval"][0],
                     "text": original["text"],
                 }
-                if local["end"] <= local["start"]:
-                    result.append(
-                        {"words": [], "failed": True, "failure_code": "ZERO_DURATION_SEGMENT"}
-                    )
-                    continue
-                try:
-                    aligned = self.wx.align(
-                        [local],
-                        self.model,
-                        self.metadata,
-                        audio,
-                        "cpu",
-                        interpolate_method="ignore",
-                        return_char_alignments=False,
-                        print_progress=False,
-                    )
-                    result.append({"words": aligned["word_segments"]})
-                except Exception as error:
-                    # Transcript-bearing exception strings stay out of logs and artifacts.
-                    result.append(
-                        {"words": [], "failed": True, "failure_code": type(error).__name__}
-                    )
+                require(local["end"] > local["start"], "zero-duration alignment segment")
+                # Exceptions propagate to the unit's sanitized execution failure.
+                aligned = self.wx.align(
+                    [local],
+                    self.model,
+                    self.metadata,
+                    audio,
+                    "cpu",
+                    interpolate_method="ignore",
+                    return_char_alignments=False,
+                    print_progress=False,
+                )
+                result.append({"words": aligned["word_segments"]})
         return result
 
 
@@ -738,7 +866,9 @@ def run_alignment(
             for unit in plan["units"]:
                 cp_path = checkpoint_path(plan_path, unit)
                 old = read_checkpoint(cp_path, plan, unit, reviewed) if cp_path.exists() else None
-                if old and old["status"] == "SUCCEEDED":
+                if old:
+                    old = recover_checkpoint(cp_path, old, plan, unit, reviewed)
+                if old and checkpoint_state(old, plan, unit, reviewed) in TERMINAL_COMPLETE:
                     continue
                 checkpoint = {
                     "schema_version": 1,
@@ -758,13 +888,13 @@ def run_alignment(
                 atomic_write_json(cp_path, seal_artifact(checkpoint))
                 started = time.perf_counter()
                 clip = plan_path.parent / "derived" / f"{unit['unit_id']}.wav"
-                require(
-                    clip.resolve().is_relative_to(plan_path.parent.resolve())
-                    and clip.resolve() != source.resolve()
-                    and not clip.is_symlink(),
-                    "unsafe derived alignment clip destination",
-                )
                 try:
+                    require(
+                        clip.resolve().is_relative_to(plan_path.parent.resolve())
+                        and clip.resolve() != source.resolve()
+                        and not clip.is_symlink(),
+                        "unsafe derived alignment clip destination",
+                    )
                     if unit["segment_indices"]:
                         if engine is None:
                             engine = engine_factory(config.application.root)
@@ -791,11 +921,11 @@ def run_alignment(
                     validate_segments(
                         checkpoint["segments"], reviewed, unit, plan["duration_seconds"]
                     )
-                    require(
-                        not any(s["status"] == "ALIGNMENT_FAILED" for s in checkpoint["segments"]),
-                        "unit contains failed segment alignment",
-                    )
-                    checkpoint["status"] = "SUCCEEDED"
+                    checkpoint["status"] = segment_outcome(checkpoint["segments"])
+                    checkpoint["execution_completed"] = True
+                except (KeyboardInterrupt, SystemExit):
+                    checkpoint.update(status="INTERRUPTED", failure_code="PROCESS_INTERRUPTED")
+                    raise
                 except Exception as error:
                     checkpoint.update(status="FAILED", failure_code=type(error).__name__)
                     if not checkpoint["segments"]:
@@ -871,72 +1001,142 @@ def run_alignment(
                 reviewed_fingerprint=path_fingerprint(plan),
                 plan_path=plan_path,
             )
-            if report["mode_processing_complete"]:
-                segments = [
-                    s
-                    for u in plan["units"]
-                    for s in read_checkpoint(checkpoint_path(plan_path, u), plan, u, reviewed)[
-                        "segments"
-                    ]
-                ]
-                validate_coverage(plan, reviewed, segments)
-                output_root = path.parents[2] / "aligned"
-                if smoke:
-                    output_root = output_root / "smoke"
-                output = output_root / plan["stage_fingerprint"]
-                require(
-                    output.resolve().is_relative_to((path.parents[2] / "aligned").resolve()),
-                    "aligned output escapes lineage",
-                )
-                aligned_path = output / "transcript.aligned.fa.json"
-                document = seal_artifact(
-                    {
-                        "schema_version": 1,
-                        "artifact_type": "aligned_asr",
-                        "status": "SUCCEEDED",
-                        "session_id": sid,
-                        "source_sha256": plan["source_sha256"],
-                        "model": MODEL,
-                        "stage_fingerprint": plan["stage_fingerprint"],
-                        "parent_checksums": plan["parent_checksums"],
-                        "plan_checksum": plan["artifact_checksum"],
-                        "configuration": plan["configuration"],
-                        "source": reviewed["source"],
-                        "probe": reviewed["probe"],
-                        "segments": segments,
-                        "segment_count": len(segments),
-                        "qa": {
-                            k: report[k]
-                            for k in (
-                                "unaligned_word_count",
-                                "qa_counts",
-                                "coverage_validation_pass",
-                                "full_alignment_complete",
-                            )
-                        },
-                        "unit_checksums": {
-                            u["unit_id"]: read_checkpoint(
-                                checkpoint_path(plan_path, u), plan, u, reviewed
-                            )["artifact_checksum"]
-                            for u in plan["units"]
-                        },
-                        "reviewed_text_authoritative": True,
-                        "cloud_llm_required": False,
-                    }
-                )
-                if aligned_path.exists():
-                    require(
-                        read_artifact(aligned_path) == document, "existing aligned lineage changed"
-                    )
-                else:
-                    atomic_write_json(aligned_path, document)
-                report["aligned_json"] = str(aligned_path)
-            else:
-                report["aligned_json"] = None
+            report = publish_alignment(path, reviewed, plan_path, plan, report)
         finally:
             del engine
             gc.collect()
     return report
+
+
+def publish_alignment(path, reviewed, plan_path, plan, report):
+    """Publish only validated terminal checkpoints; never invoke an engine."""
+    if report["mode_processing_complete"]:
+        segments = [
+            s
+            for u in plan["units"]
+            for s in read_checkpoint(checkpoint_path(plan_path, u), plan, u, reviewed)["segments"]
+        ]
+        validate_coverage(plan, reviewed, segments)
+        segments = copy.deepcopy(segments)
+        for segment in segments:
+            segment["alignment_status"] = segment["status"]
+            segment["segment_timing_source"] = "REVIEWED_PARENT"
+            segment["reviewed_interval"] = [segment["start"], segment["end"]]
+        output_root = path.parents[2] / "aligned"
+        if plan["configuration"]["mode"] == "SMOKE":
+            output_root = output_root / "smoke"
+        output = output_root / plan["stage_fingerprint"]
+        require(
+            output.resolve().is_relative_to((path.parents[2] / "aligned").resolve()),
+            "aligned output escapes lineage",
+        )
+        aligned_path = output / "transcript.aligned.fa.json"
+        document = seal_artifact(
+            {
+                "schema_version": 1,
+                "artifact_type": "aligned_asr",
+                "status": "SUCCEEDED",
+                "session_id": plan["session_id"],
+                "source_sha256": plan["source_sha256"],
+                "model": MODEL,
+                "stage_fingerprint": plan["stage_fingerprint"],
+                "parent_checksums": plan["parent_checksums"],
+                "plan_checksum": plan["artifact_checksum"],
+                "configuration": plan["configuration"],
+                "source": reviewed["source"],
+                "probe": reviewed["probe"],
+                "segments": segments,
+                "segment_count": len(segments),
+                "qa": {
+                    k: report[k]
+                    for k in (
+                        "unaligned_word_count",
+                        "mode_processing_complete",
+                        "alignment_has_warnings",
+                        "unit_status_counts",
+                        "succeeded_units",
+                        "partial_units",
+                        "failed_units",
+                        "qa_counts",
+                        "word_qa_counts",
+                        "segment_status_counts",
+                        "coverage_validation_pass",
+                        "full_alignment_complete",
+                    )
+                },
+                "unit_checksums": {
+                    u["unit_id"]: read_checkpoint(checkpoint_path(plan_path, u), plan, u, reviewed)[
+                        "artifact_checksum"
+                    ]
+                    for u in plan["units"]
+                },
+                "reviewed_text_authoritative": True,
+                "cloud_llm_required": False,
+            }
+        )
+        if aligned_path.exists():
+            require(read_artifact(aligned_path) == document, "existing aligned lineage changed")
+        else:
+            atomic_write_json(aligned_path, document)
+        report["aligned_json"] = str(aligned_path)
+    else:
+        report["aligned_json"] = None
+    return report
+
+
+def finalize_alignment(config, sid, *, plan_path=None, smoke=False, reviewed_fingerprint=None):
+    """Finalize existing complete results only; no plan, audio decoding, or inference."""
+    with (
+        exclusive_lock(config.application.work_path / sid / "alignment/.worker.lock"),
+        deny_network(),
+    ):
+        report = status_report(
+            config,
+            sid,
+            plan_path=plan_path,
+            smoke=smoke,
+            reviewed_fingerprint=reviewed_fingerprint,
+        )
+        if not report.get("mode_processing_complete"):
+            return {**report, "aligned_json": None}
+        plan_path = Path(report["plan_path"])
+        plan = read_artifact(plan_path)
+        path, reviewed, source, _, integrity = load_input(config, sid, path_fingerprint(plan))
+        validate_plan(config, plan, path, reviewed, integrity, model_spec(config))
+        require(not plan["execution_blockers"], "alignment plan has execution blockers")
+        require(sha256_file(source) == reviewed["source_sha256"], "source audio SHA-256 mismatch")
+        immutable = [path, path.with_suffix(".txt"), source]
+        raw = path.parents[2] / "transcript.raw.fa.json"
+        immutable.extend(p for p in (raw, raw.with_suffix(".txt")) if p.exists())
+        baseline = {p: (sha256_file(p), p.stat().st_mtime_ns) for p in immutable}
+        for unit in plan["units"]:
+            cp_path = checkpoint_path(plan_path, unit)
+            cp = read_checkpoint(cp_path, plan, unit, reviewed)
+            recover_checkpoint(cp_path, cp, plan, unit, reviewed)
+        report = status_report(
+            config, sid, plan_path=plan_path, reviewed_fingerprint=path_fingerprint(plan)
+        )
+        require(
+            all(
+                sha256_file(p) == sha and p.stat().st_mtime_ns == modified
+                for p, (sha, modified) in baseline.items()
+            ),
+            "immutable source/raw/reviewed input changed during finalization",
+        )
+        report = publish_alignment(path, reviewed, plan_path, plan, report)
+        atomic_write_json(
+            plan_path.parent / "progress.json",
+            seal_artifact(
+                {
+                    "schema_version": 1,
+                    "artifact_type": "alignment_progress",
+                    "plan_checksum": plan["artifact_checksum"],
+                    "updated_at": utc_timestamp(),
+                    **report,
+                }
+            ),
+        )
+        return report
 
 
 def path_fingerprint(plan):
