@@ -1,0 +1,199 @@
+{
+  "models": [
+    {
+      "destination": "models/asr/edaa852ec7e145841d8ffdb056a99866b5f0a478",
+      "excluded_files": [
+        ".gitattributes"
+      ],
+      "expected_family": "CTranslate2 Whisper large-v3",
+      "files": [
+        {
+          "git_blob_sha1": "a84bfa7f20cac02ea5a99efa5eaf687ad58c1caf",
+          "path": "README.md",
+          "required": false,
+          "sha256": "39e96252229f5a3d0141dc81afb65a36fd205461ac21e5b70f2cd1248ef0082c",
+          "size_bytes": 2052
+        },
+        {
+          "git_blob_sha1": "75336feae814999bae6ccccdecf177639ffc6f9d",
+          "path": "config.json",
+          "required": true,
+          "sha256": "a9306624f5ec14270a014b647e5c316b6e03a662c369758d1b90697a7b0655b9",
+          "size_bytes": 2394
+        },
+        {
+          "git_blob_sha1": null,
+          "path": "model.bin",
+          "required": true,
+          "sha256": "69f74147e3334731bc3a76048724833325d2ec74642fb52620eda87352e3d4f1",
+          "size_bytes": 3087284237
+        },
+        {
+          "git_blob_sha1": "931c77a740890c46365c7ae0c9d350ba3cca908f",
+          "path": "preprocessor_config.json",
+          "required": true,
+          "sha256": "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711",
+          "size_bytes": 340
+        },
+        {
+          "git_blob_sha1": "3a5e2ba63acdcac9a19ba56cf9bd27f185bfff61",
+          "path": "tokenizer.json",
+          "required": true,
+          "sha256": "6d8cbd7cd0d8d5815e478dac67b85a26bbe77c1f5e0c6d76d1ce2abc0e5f21ca",
+          "size_bytes": 2480617
+        },
+        {
+          "git_blob_sha1": "0adcd01e7c237205d593b707e66dd5d7bc785d2d",
+          "path": "vocabulary.json",
+          "required": true,
+          "sha256": "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1",
+          "size_bytes": 1068114
+        }
+      ],
+      "gated": false,
+      "license": "mit",
+      "repo_id": "Systran/faster-whisper-large-v3",
+      "revision": "edaa852ec7e145841d8ffdb056a99866b5f0a478",
+      "role": "asr",
+      "tracking_ref": "main"
+    },
+    {
+      "destination": "models/alignment/234714078a1398a9db88194c5a40fefe6f376dc1",
+      "excluded_files": [
+        "flax_model.msgpack"
+      ],
+      "expected_family": "PyTorch Wav2Vec2 Persian CTC",
+      "files": [
+        {
+          "git_blob_sha1": "715f7e2952dad141c3aac0135ce36b713f472a7d",
+          "path": "README.md",
+          "required": false,
+          "sha256": "b947d7933e6d0b5a94491cc555e80cea18378fba3b65516e83becb17a2235002",
+          "size_bytes": 7549
+        },
+        {
+          "git_blob_sha1": "428a17c72eb637686c791a34a39f45e49acf751a",
+          "path": "config.json",
+          "required": true,
+          "sha256": "a58a11ca6cd6387f97ba4f51ba5621ba5eec26b565c65dda080c573facae61c8",
+          "size_bytes": 1565
+        },
+        {
+          "git_blob_sha1": "0886a48276922a77013d8aa4681192138ae90d90",
+          "path": "preprocessor_config.json",
+          "required": true,
+          "sha256": "c403ce09975b90dff0dd8302c42d422e9de1f166cd7772df23490069893cb0cf",
+          "size_bytes": 158
+        },
+        {
+          "git_blob_sha1": null,
+          "path": "pytorch_model.bin",
+          "required": true,
+          "sha256": "3b859c7f562a2cc3c6002c2eb5178b66777406c4fccf53f196ead46a4f6c4796",
+          "size_bytes": 1262208535
+        },
+        {
+          "git_blob_sha1": "25bc39604f72700b3b8e10bd69bb2f227157edd1",
+          "path": "special_tokens_map.json",
+          "required": true,
+          "sha256": "bb7068de1150661a10b55f9e4b12a0e77af8bf91f5e45e1b58afaf1d0e17f675",
+          "size_bytes": 85
+        },
+        {
+          "git_blob_sha1": "85f8f138343afc69e29b10fdc99ba53b275ca23d",
+          "path": "vocab.json",
+          "required": true,
+          "sha256": "d1691d3d4a072da1ddc1703ca8ee142f8e0fc0f64fa50f4b76963008262c9f94",
+          "size_bytes": 656
+        }
+      ],
+      "gated": false,
+      "license": "apache-2.0",
+      "repo_id": "jonatasgrosman/wav2vec2-large-xlsr-53-persian",
+      "revision": "234714078a1398a9db88194c5a40fefe6f376dc1",
+      "role": "alignment",
+      "tracking_ref": "main"
+    },
+    {
+      "destination": "models/diarization/3533c8cf8e369892e6b79ff1bf80f7b0286a54ee",
+      "excluded_files": [
+        ".gitattributes",
+        "diarization.gif"
+      ],
+      "expected_family": "pyannote Community-1 local pipeline",
+      "files": [
+        {
+          "git_blob_sha1": "8356d6634d7b1074581dd36e2225887ec809326e",
+          "path": "README.md",
+          "required": false,
+          "sha256": null,
+          "size_bytes": 9978
+        },
+        {
+          "git_blob_sha1": "4022db43960736338378fdb6b5a85cfdae198910",
+          "path": "config.yaml",
+          "required": true,
+          "sha256": null,
+          "size_bytes": 444
+        },
+        {
+          "git_blob_sha1": "d71f943e00016652680bef1e6c49fbc842e0d4c4",
+          "path": "embedding/README.md",
+          "required": false,
+          "sha256": null,
+          "size_bytes": 938
+        },
+        {
+          "git_blob_sha1": null,
+          "path": "embedding/pytorch_model.bin",
+          "required": true,
+          "sha256": "6f10ff60898a1d185fa22e1d11e0bfa8a92efec811f11bca48cb8cafebefd929",
+          "size_bytes": 26646242
+        },
+        {
+          "git_blob_sha1": "5c01ad2e673203fe32a82d7a140eb817db9930b7",
+          "path": "plda/README.md",
+          "required": false,
+          "sha256": null,
+          "size_bytes": 220
+        },
+        {
+          "git_blob_sha1": null,
+          "path": "plda/plda.npz",
+          "required": true,
+          "sha256": "9b77bcd840692710dd3496f62ecfeed8d8e5f002fd991b785079b244eab7d255",
+          "size_bytes": 133852
+        },
+        {
+          "git_blob_sha1": null,
+          "path": "plda/xvec_transform.npz",
+          "required": true,
+          "sha256": "325f1ce8e48f7e55e9c8aa47e05d2766b7c48c4b25b8de8dd751e7a4cc5fbe8f",
+          "size_bytes": 134376
+        },
+        {
+          "git_blob_sha1": null,
+          "path": "segmentation/pytorch_model.bin",
+          "required": true,
+          "sha256": "7ad24338d844fb95985486eb1a464e32d229f6d7a03c9abe60f978bacf3f816e",
+          "size_bytes": 5906507
+        }
+      ],
+      "gated": true,
+      "license": "cc-by-4.0",
+      "repo_id": "pyannote/speaker-diarization-community-1",
+      "revision": "3533c8cf8e369892e6b79ff1bf80f7b0286a54ee",
+      "role": "diarization",
+      "tracking_ref": "main"
+    }
+  ],
+  "schema_version": 1,
+  "states": [
+    "MISSING",
+    "PARTIAL",
+    "PROVISIONED",
+    "CORRUPT",
+    "BLOCKED_AUTH",
+    "BLOCKED_ACCESS_CONDITIONS"
+  ]
+}

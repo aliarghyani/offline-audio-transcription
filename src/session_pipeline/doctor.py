@@ -12,6 +12,7 @@ from typing import Any
 
 from session_pipeline import __version__, runtime
 from session_pipeline.config import AppConfig
+from session_pipeline.model_store import ModelLockError, models_report
 
 
 def executable_info(name: str) -> dict[str, Any]:
@@ -73,7 +74,9 @@ def build_report(config: AppConfig) -> dict[str, Any]:
     failed |= not pins_ok
     # Presence only. Never obtain the token's value or include AppConfig.secrets.
     token_present = "HF_TOKEN" in runtime.os.environ
-    warnings = ["Model weights were not loaded; model access, revisions and RAM fit are untested."]
+    warnings = [
+        "Models were not loaded; inference compatibility, gated access and RAM fit are untested."
+    ]
     if not token_present:
         warnings.append("HF_TOKEN absent; future gated model access requires separate preparation.")
     if not selected:
@@ -81,10 +84,21 @@ def build_report(config: AppConfig) -> dict[str, Any]:
     for name, probe in probes.items():
         if probe.get("stderr"):
             warnings.append(f"{name} emitted diagnostics; see its stderr field.")
+    try:
+        model_status = models_report(config.application.root)
+    except ModelLockError:
+        model_status = {"models_ready": False, "models": [], "error": "MODEL_LOCK_UNAVAILABLE"}
+    if not model_status["models_ready"]:
+        warnings.append("Pinned external models are incomplete; see model readiness.")
     return {
         "schema_version": 1,
         "status": "FAIL" if failed else "WARN" if warnings else "PASS",
         "software_status": "FAIL" if failed else "PASS",
+        "software_ready": not failed,
+        "models_ready": model_status["models_ready"],
+        "transcription_ready": False,
+        "transcription_readiness_reason": "No valid source authorized; existing source is damaged.",
+        "model_readiness": model_status,
         "python_version": platform.python_version(),
         "pipeline_version": __version__,
         "package_versions": versions,
@@ -97,8 +111,8 @@ def build_report(config: AppConfig) -> dict[str, Any]:
         "hf_token": "present" if token_present else "absent",
         "model_download_readiness": {
             "status": "WARN", "network_access": "disabled in probes",
-            "gated_access": "UNKNOWN", "revisions_pinned": False,
-            "downloads_authorized": False,
+            "gated_access": "UNKNOWN", "revisions_pinned": bool(model_status["models"]),
+            "explicit_provision_command_required": True,
         },
         "models_loaded": False,
         "warnings": warnings,
@@ -127,5 +141,14 @@ def human_report(report: dict[str, Any]) -> str:
     lines.append(f"Configured ML: {report['configured_ml']}")
     lines.append(f"HF_TOKEN: {report['hf_token']}; models loaded: {report['models_loaded']}")
     lines.append(f"Model download readiness: {report['model_download_readiness']}")
+    lines.append(
+        f"Software ready: {report['software_ready']}; models ready: {report['models_ready']}; "
+        f"transcription ready: {report['transcription_ready']}"
+    )
+    for model in report["model_readiness"]["models"]:
+        lines.append(
+            f"{model['role']}: {model['status']} {model['repo_id']}@{model['revision']} "
+            f"({model['access_readiness']})"
+        )
     lines.extend(f"WARN: {warning}" for warning in report["warnings"])
     return "\n".join(lines)

@@ -1,8 +1,13 @@
 # Pipeline architecture
 
 Phase 3A implements the integrity and contract foundation. Phase 3B adds the
-locked CPU software environment and offline `doctor` command. Future inference
-stages are documented here; they are not available CLI commands.
+locked CPU software environment and offline `doctor` command. Phase 3C adds
+pinned model-file provisioning/status/verification, without model loading.
+Phase 4A adds [ASR quality review and separate targeted retry candidates](ASR_QUALITY.md)
+from completed raw JSON. Review/status and retry planning are offline metadata
+operations; explicit `qa retry --execute` launches a local pinned ASR worker.
+Alignment and diarization remain future CLI stages. Codex is development-only;
+local runtime has no cloud LLM dependency or automatic candidate replacement.
 
 ```text
 Integrity → Prepare → ASR → Alignment ─┐
@@ -23,6 +28,12 @@ downloaded or loaded. The required WhisperX wheel's bundled VAD checkpoint is an
 explicitly approved package asset, installed but never loaded. External model
 downloads and model loading/inference did not occur in Phase 3B; see
 [ML runtime](ML_RUNTIME.md).
+
+Phase 3C's separate [model lock and offline path contract](MODEL_PROVISIONING.md)
+pins the approved external repositories. ASR and PyTorch Persian alignment files
+are provisioned locally; Community-1 remains BLOCKED_AUTH. No inference model
+was loaded. Future loaders must validate and use local pinned paths with offline
+semantics, failing on missing files rather than fetching another revision.
 
 ASR may use checkpointed chunks with absolute time offsets; duration, overlap,
 batch size, and workers remain unset until measured on valid input. Chunking is

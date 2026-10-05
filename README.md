@@ -4,7 +4,12 @@ This repository is the privacy-first foundation for a local Persian session
 transcription pipeline. Phase 3A implements source discovery, full input integrity
 validation, canonical JSON artifacts, stage fingerprints, checkpoint contracts,
 and typed QA concepts. Phase 3B provisions CPU ML software and adds an offline
-environment doctor. No command runs transcription or downloads model weights.
+environment doctor. Phase 3C adds explicit pinned model-file provisioning and
+offline verification. Phase 4A adds deterministic ASR review and an explicit local
+targeted-retry worker; see [ASR quality and retry](docs/ASR_QUALITY.md).
+QA review/status and default retry planning do not load inference models.
+Only `qa retry --execute` starts local retry inference. Runtime requires no
+Codex session, OpenAI API, LLM API, cloud prompts or ChatGPT tokens.
 No psychological or therapy-content interpretation belongs in this repository.
 
 ## Private data boundary
@@ -63,6 +68,9 @@ uv run --no-sync session-pipeline discover --json
 uv run --no-sync session-pipeline config show --json
 uv run --no-sync session-pipeline doctor
 uv run --no-sync session-pipeline doctor --json
+uv run --no-sync session-pipeline models status --json
+uv run --no-sync session-pipeline models provision
+uv run --no-sync session-pipeline models verify
 uv run --no-sync session-pipeline integrity "sessions\example.m4a"
 & .\scripts\run.ps1 integrity "sessions\example.m4a" --json
 ```
@@ -77,18 +85,27 @@ returns structured results without raw FFmpeg diagnostic text.
 PyTorch, CTranslate2 INT8, WhisperX mappings/signatures, and decodes a generated
 temporary tone with TorchCodec. It never reads sessions or reference transcripts,
 calls an inference model loader, or uses a token value. PASS/FAIL describe the
-software checks; WARN explicitly leaves model access/revisions/RAM fit untested.
+software checks; WARN leaves inference compatibility, gated access and RAM fit untested.
 Model packages installed **does not mean the requested inference models are
-provisioned**. No model repository or separate model-weight download was initiated.
+provisioned**. Phase 3B initiated no model repository or separate weight download.
 The standard WhisperX wheel includes the explicitly approved bundled VAD
 checkpoint (17,719,103 bytes), installed but never loaded in Phase 3B. External
 model downloads and model loading/inference were prohibited and did not occur;
 see the classification in [ML runtime](docs/ML_RUNTIME.md).
 
+Phase 3C separately downloads approved external model files through explicit
+`models provision`. See [model provisioning](docs/MODEL_PROVISIONING.md) for exact
+revisions, licenses, local storage, gated access and the future offline contract.
+ASR/alignment are provisioned; Community-1 is BLOCKED_AUTH until its official
+conditions are accepted and an authorized HF_TOKEN is available in the process
+environment. Model status never downloads. Verification hashes local files only.
+
 Current exit codes: `0` success (including doctor WARN), `2` CLI usage,
 `3` invalid input/discovery, `4` configuration error, and `5` doctor software
-failure. No ASR, alignment, diarization, speaker mapping,
-rendering, or model-download command exists yet.
+failure, and `6` models incomplete/blocked/corrupt. Doctor exposes separate
+`software_ready`, `models_ready`, and `transcription_ready` fields. The damaged
+current source remains unsuitable for transcription. No ASR, alignment,
+diarization, speaker mapping or rendering command exists yet.
 
 ## Architecture
 

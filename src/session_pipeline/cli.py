@@ -1,4 +1,4 @@
-"""Small local CLI for discovery, configuration, and source integrity only."""
+"""Local CLI for environment, integrity, model files and ASR quality review."""
 
 from __future__ import annotations
 
@@ -15,12 +15,20 @@ from session_pipeline.discovery import discover_sessions
 from session_pipeline.doctor import build_report, human_report
 from session_pipeline.fingerprint import stage_fingerprint
 from session_pipeline.integrity import inspect_audio
+from session_pipeline.model_store import (
+    APPROVED,
+    ModelLockError,
+    check_remote_revisions,
+    human_models_report,
+    models_report,
+)
 from session_pipeline.models import SourceChangedError
 
 EXIT_SUCCESS = 0
 EXIT_INPUT_INVALID = 3
 EXIT_CONFIGURATION_ERROR = 4
 EXIT_ENVIRONMENT_INVALID = 5
+EXIT_MODELS_NOT_READY = 6
 
 
 def _configure_console_streams() -> None:
@@ -55,6 +63,28 @@ def _parser() -> argparse.ArgumentParser:
     show.add_argument("--json", action="store_true")
     doctor = commands.add_parser("doctor", help="check ML software offline without loading models")
     doctor.add_argument("--json", action="store_true")
+    models = commands.add_parser("models", help="manage pinned model files without inference")
+    model_commands = models.add_subparsers(dest="model_command", required=True)
+    for name in ("status", "provision", "verify"):
+        model_command = model_commands.add_parser(name)
+        model_command.add_argument("--role", choices=APPROVED)
+        model_command.add_argument("--json", action="store_true")
+    updates = model_commands.add_parser("check-updates", help="explicit remote metadata check")
+    updates.add_argument("--json", action="store_true")
+    qa = commands.add_parser("qa", help="offline ASR review and separate retry candidates")
+    qa_commands = qa.add_subparsers(dest="qa_command", required=True)
+    for name in ("asr", "status", "retry"):
+        command = qa_commands.add_parser(name)
+        command.add_argument("session_id")
+        command.add_argument("--json", action="store_true")
+        if name == "asr":
+            command.add_argument("--thresholds", type=Path)
+        if name == "retry":
+            command.add_argument("--entry", action="append")
+            command.add_argument("--max-seconds", type=float, default=900)
+            command.add_argument(
+                "--execute", action="store_true", help="run local inference; default is plan only"
+            )
     return parser
 
 
@@ -72,6 +102,87 @@ def run(argv: list[str] | None = None) -> int:
     except ConfigurationError as error:
         print(f"Configuration error: {error}", file=sys.stderr)
         return EXIT_CONFIGURATION_ERROR
+    if args.command == "qa":
+        from session_pipeline.artifacts import read_artifact
+        from session_pipeline.asr_quality import create_review, load_canonical, session_paths
+
+        try:
+            if args.qa_command == "retry":
+                from session_pipeline.asr_retry import launch_worker, make_plan
+
+                path, plan = make_plan(config, args.session_id, args.entry, args.max_seconds)
+                report = {
+                    key: plan[key]
+                    for key in (
+                        "target_audio_seconds",
+                        "decoded_audio_seconds",
+                        "execution_allowed",
+                        "execution_blockers",
+                        "canonical_replacement",
+                        "cloud_llm_required",
+                    )
+                }
+                report.update(
+                    plan_path=str(path),
+                    window_count=len(plan["windows"]),
+                    mode="execute" if args.execute else "plan_only",
+                )
+                _emit(report if args.json else json.dumps(report, indent=2), json_mode=args.json)
+                if args.execute:
+                    if not plan["execution_allowed"]:
+                        return EXIT_INPUT_INVALID
+                    return launch_worker(config, args.session_id, path)
+                return EXIT_SUCCESS
+            if args.qa_command == "asr":
+                path, review = create_review(config, args.session_id, args.thresholds)
+            else:
+                raw_path, _, path = session_paths(config, args.session_id)
+                raw = load_canonical(raw_path, args.session_id)
+                review = read_artifact(path)
+                if (
+                    review.get("status") != "SUCCEEDED"
+                    or review.get("artifact_type") != "asr_review"
+                    or review.get("session_id") != args.session_id
+                    or review.get("source_sha256") != raw["source_sha256"]
+                    or review["parent_checksums"]["canonical_asr"] != raw["artifact_checksum"]
+                ):
+                    raise ValueError("review is stale")
+            report = {
+                key: review[key]
+                for key in (
+                    "segment_count",
+                    "distributions",
+                    "temperature_counts",
+                    "repeated_text_groups",
+                    "segment_flag_counts",
+                    "entry_flag_counts",
+                    "flagged_segment_count",
+                    "proposed_retry_union_seconds",
+                    "cloud_llm_required",
+                )
+            }
+            report.update(review_path=str(path), entry_count=len(review["entries"]))
+            _emit(report if args.json else json.dumps(report, indent=2), json_mode=args.json)
+            return EXIT_SUCCESS
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            print(f"QA failed: {type(error).__name__}", file=sys.stderr)
+            return EXIT_INPUT_INVALID
+    if args.command == "models":
+        try:
+            if args.model_command == "check-updates":
+                report = check_remote_revisions(config.application.root)
+                _emit(report, json_mode=args.json)
+                return EXIT_SUCCESS
+            report = models_report(
+                config.application.root,
+                action=args.model_command,
+                role=args.role,
+            )
+        except ModelLockError as error:
+            print(f"Model configuration error: {error}", file=sys.stderr)
+            return EXIT_CONFIGURATION_ERROR
+        _emit(report if args.json else human_models_report(report), json_mode=args.json)
+        return EXIT_SUCCESS if report["models_ready"] else EXIT_MODELS_NOT_READY
     if args.command == "doctor":
         report = build_report(config)
         _emit(report if args.json else human_report(report), json_mode=args.json)

@@ -1,0 +1,20 @@
+{
+  "high_temperature": 0.6,
+  "low_avg_logprob": -1.0,
+  "low_word_probability": 0.2,
+  "low_word_min_count": 2,
+  "low_word_min_fraction": 0.2,
+  "short_segment_seconds": 0.35,
+  "repetition_min_characters": 20,
+  "repetition_nearby_seconds": 15.0,
+  "repetition_ngram_words": 5,
+  "repetition_min_occurrences": 3,
+  "gap_seconds": 15.0,
+  "gap_min_speech_seconds": 3.0,
+  "unknown_speech_gap_seconds": 30.0,
+  "boundary_margin_seconds": 0.5,
+  "hallucination_no_speech_probability": 0.8,
+  "hallucination_avg_logprob": -1.0,
+  "retry_padding_seconds": 5.0,
+  "retry_max_target_seconds": 60.0
+}
