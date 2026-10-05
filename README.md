@@ -18,6 +18,11 @@ Start with `session-pipeline qa review build <session-id>`, then
 locally. `qa merge` requires completed review and writes a separate reviewed
 lineage; original raw transcripts are preserved.
 
+Phase 4C adds [resumable Persian forced alignment](docs/ALIGNMENT.md) from the
+accepted reviewed lineage. `session-pipeline align <session-id>` plans only;
+`--execute --smoke` runs a separate bounded smoke, and `--execute` explicitly
+runs/resumes full local alignment. `--status` is read-only and loads no model.
+
 ## Private data boundary
 
 Put future recordings in `sessions/` and leave each original file unchanged.

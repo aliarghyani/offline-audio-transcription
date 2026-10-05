@@ -63,6 +63,18 @@ def _parser() -> argparse.ArgumentParser:
     show.add_argument("--json", action="store_true")
     doctor = commands.add_parser("doctor", help="check ML software offline without loading models")
     doctor.add_argument("--json", action="store_true")
+    align = commands.add_parser(
+        "align", help="offline reviewed-transcript alignment; default is plan only"
+    )
+    align.add_argument("session_id")
+    mode = align.add_mutually_exclusive_group()
+    mode.add_argument("--plan", action="store_true")
+    mode.add_argument("--execute", action="store_true")
+    mode.add_argument("--status", action="store_true")
+    align.add_argument("--smoke", action="store_true", help="separate first-180-second lineage")
+    align.add_argument("--reviewed-fingerprint", help="pin a reviewed input instead of latest")
+    align.add_argument("--fingerprint", help="existing alignment plan fingerprint (status only)")
+    align.add_argument("--json", action="store_true")
     models = commands.add_parser("models", help="manage pinned model files without inference")
     model_commands = models.add_subparsers(dest="model_command", required=True)
     for name in ("status", "provision", "verify"):
@@ -125,6 +137,58 @@ def run(argv: list[str] | None = None) -> int:
     except ConfigurationError as error:
         print(f"Configuration error: {error}", file=sys.stderr)
         return EXIT_CONFIGURATION_ERROR
+    if args.command == "align":
+        from session_pipeline.alignment import make_plan, plan_report, run_alignment, status_report
+        from session_pipeline.asr_quality import session_paths
+
+        try:
+            if args.fingerprint:
+                import re
+
+                if not args.status or not re.fullmatch(r"[0-9a-f]{64}", args.fingerprint):
+                    raise ValueError("--fingerprint requires --status and a SHA-256 fingerprint")
+                from session_pipeline.alignment import path_fingerprint
+                from session_pipeline.artifacts import read_artifact
+
+                _, work, _ = session_paths(config, args.session_id)
+                plan_path = work / "alignment" / args.fingerprint / "plan.json"
+                old = read_artifact(plan_path)
+                args.reviewed_fingerprint = path_fingerprint(old)
+                args.smoke = old["configuration"]["mode"] == "SMOKE"
+            else:
+                plan_path = None
+            if args.status:
+                report = status_report(
+                    config,
+                    args.session_id,
+                    smoke=args.smoke,
+                    reviewed_fingerprint=args.reviewed_fingerprint,
+                    plan_path=plan_path,
+                )
+            elif args.execute:
+                report = run_alignment(
+                    config,
+                    args.session_id,
+                    smoke=args.smoke,
+                    reviewed_fingerprint=args.reviewed_fingerprint,
+                )
+            else:
+                path, plan = make_plan(
+                    config,
+                    args.session_id,
+                    smoke=args.smoke,
+                    reviewed_fingerprint=args.reviewed_fingerprint,
+                )
+                report = plan_report(config, path, plan)
+            _emit(report if args.json else json.dumps(report, indent=2), json_mode=args.json)
+            return (
+                EXIT_SUCCESS
+                if not args.execute or report["mode_processing_complete"]
+                else EXIT_INPUT_INVALID
+            )
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            print(f"Alignment failed: {type(error).__name__}", file=sys.stderr)
+            return EXIT_INPUT_INVALID
     if args.command == "qa":
         from session_pipeline.artifacts import read_artifact
         from session_pipeline.asr_quality import create_review, load_canonical, session_paths

@@ -6,15 +6,23 @@ pinned model-file provisioning/status/verification, without model loading.
 Phase 4A adds [ASR quality review and separate targeted retry candidates](ASR_QUALITY.md)
 from completed raw JSON. Review/status and retry planning are offline metadata
 operations; explicit `qa retry --execute` launches a local pinned ASR worker.
-Alignment and diarization remain future CLI stages. Codex is development-only;
-local runtime has no cloud LLM dependency or automatic candidate replacement.
+Codex is development-only; local runtime has no cloud LLM dependency.
+Diarization remains a future CLI stage.
 
 Phase 4B adds [local human decisions and a reviewed lineage](HUMAN_REVIEW.md).
 The loopback review server uses the existing retry artifacts, validates all
 parents and exposes local playback. Human-approved target B spans are merged
 only when boundaries are unambiguous; UNCLEAR retains A with unresolved markers.
 Raw JSON/TXT are immutable. Reviewed outputs carry full provenance and remain
-pending explicit QA acceptance before alignment.
+pending explicit QA acceptance before alignment in the human workflow. Phase
+4B.2's explicitly authorized AUTO_PREFER_B workflow records structural acceptance
+and keeps human verification false.
+
+Phase 4C adds [resumable Persian forced alignment](ALIGNMENT.md). It consumes
+only structurally accepted reviewed JSON, pins the local Persian CTC snapshot,
+and writes a separate aligned lineage. Plans and status load no model; only an
+explicit execute runs a sequential CPU model process. Every reviewed segment
+has one deterministic unit owner; smoke checkpoints cannot complete a full run.
 
 ```text
 Integrity → Prepare → ASR → Alignment ─┐
