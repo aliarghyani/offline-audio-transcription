@@ -36,6 +36,7 @@ from session_pipeline.config import AppConfig, load_config
 from session_pipeline.fingerprint import stage_fingerprint
 from session_pipeline.model_store import local_model_path, local_only_environment
 from session_pipeline.models import StageStatus, sha256_file, utc_timestamp
+from session_pipeline.product_defaults import ASR_DECODE
 
 MODEL = {
     "asr": {
@@ -43,22 +44,7 @@ MODEL = {
         "revision": "edaa852ec7e145841d8ffdb056a99866b5f0a478",
     }
 }
-DECODE = {
-    "language": "fa",
-    "device": "cpu",
-    "compute_type": "int8",
-    "cpu_threads": 8,
-    "num_workers": 1,
-    "beam_size": 5,
-    "best_of": 5,
-    "word_timestamps": True,
-    "vad_filter": False,
-    "condition_on_previous_text": True,
-    "initial_prompt": None,
-    "hotwords": None,
-    "temperature": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
-    "retry_policy_version": 1,
-}
+DECODE = ASR_DECODE
 
 
 def package_identity() -> dict[str, str]:
@@ -304,10 +290,10 @@ def local_engine(root: Path):
 
     model = WhisperModel(
         str(path),
-        device="cpu",
-        compute_type="int8",
-        cpu_threads=8,
-        num_workers=1,
+        device=DECODE["device"],
+        compute_type=DECODE["compute_type"],
+        cpu_threads=DECODE["cpu_threads"],
+        num_workers=DECODE["num_workers"],
         local_files_only=True,
         use_auth_token=False,
     )
@@ -317,7 +303,7 @@ def local_engine(root: Path):
 
 
 def transcribe_clip(
-    engine, clip: Path, offset: float
+    engine, clip: Path, offset: float, *, checkpoint=None
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     started = time.perf_counter()
     settings = {
@@ -344,6 +330,8 @@ def transcribe_clip(
             word["start"] += offset
             word["end"] += offset
         segments.append(segment)
+        if checkpoint is not None:
+            checkpoint(segments)
     return segments, {
         "elapsed_seconds": time.perf_counter() - started,
         "decoded_duration": info.duration,

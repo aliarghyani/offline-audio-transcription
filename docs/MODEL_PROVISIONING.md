@@ -1,7 +1,8 @@
 # Pinned model provisioning (Phase 3C)
 
-This phase fetches model files and verifies them offline. It never loads a model,
-processes audio, or reads reference transcript content. Phase 4 is not implemented.
+Explicit model-management commands fetch/verify files without loading models,
+processing audio or reading reference transcript content. Normal `transcribe`
+uses provisioned local files and never starts provisioning automatically.
 
 ## Approved identities
 
@@ -18,10 +19,10 @@ use their pinned Git blob identity; explicit provisioning records their computed
 SHA-256 in the lock after verification. Local receipts contain sizes, hashes,
 revision, file metadata and a lock fingerprint; they contain no credentials.
 
-Current provisioning: ASR and alignment PROVISIONED; diarization BLOCKED_AUTH
-because HF_TOKEN is absent. Phase 3C remains incomplete; no completion commit is
-created until all roles pass offline verification. The immutable revision can be
-pinned even when access prevents downloading its files.
+Read live readiness with `models status`; historical Phase 3C BLOCKED_AUTH reports
+do not describe current provisioning. Session 4 later completed local Community-1
+inference. The lock contains public model identities; receipts, credentials and
+caches stay ignored. Normal runtime requires no HF_TOKEN.
 
 ## Local storage and commands
 
@@ -94,8 +95,9 @@ ASR: pass the local directory to faster-whisper with `local_files_only=True`.
 Alignment: pass the local directory to WhisperX with `model_cache_only=True`.
 Community-1: pass its local directory to pyannote; the installed 4.0.7 loader
 resolves `$model/segmentation`, `$model/embedding` and `$model/plda` locally.
-No loader is called during provisioning. `transcription_ready` remains false
-because the existing source is damaged and no valid source run is authorized.
+No loader is called during provisioning. New inputs pass integrity before
+transcription; earlier damaged-source readiness reports do not apply to a newly
+supplied valid recording.
 
 `check-updates` is an explicit metadata-only network operation that reports remote
 main drift without changing pins. Model updates require an explicit lock change,

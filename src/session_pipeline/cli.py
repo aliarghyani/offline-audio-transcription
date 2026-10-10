@@ -50,6 +50,29 @@ def _emit(value: Any, *, json_mode: bool) -> None:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="session-pipeline")
     commands = parser.add_subparsers(dest="command", required=True)
+    from session_pipeline.product_defaults import (
+        DEFAULT_PROFILE,
+        DEFAULT_REVIEW_POLICY,
+        REVIEW_POLICIES,
+    )
+
+    transcribe = commands.add_parser("transcribe", help="resume an offline transcription workflow")
+    transcribe.add_argument("input", type=Path)
+    transcribe.add_argument(
+        "--profile", choices=("fast", "quality", "full"), default=DEFAULT_PROFILE
+    )
+    transcribe.add_argument(
+        "--review-policy", choices=REVIEW_POLICIES, default=DEFAULT_REVIEW_POLICY
+    )
+    transcribe.add_argument("--speakers", type=int, choices=(2,), default=2)
+    transcribe.add_argument("--dry-run", action="store_true", help="plan only; no models or writes")
+    transcribe.add_argument("--json", action="store_true")
+    status = commands.add_parser("status", help="read-only pipeline view; no models/network")
+    status.add_argument("input")
+    status.add_argument("--json", action="store_true")
+    review = commands.add_parser("review", help="open the persisted human gate using session ID")
+    review.add_argument("input")
+    review.add_argument("--open", action="store_true")
     version = commands.add_parser("version", help="show the installed pipeline version")
     version.add_argument("--json", action="store_true")
     discover = commands.add_parser("discover", help="list candidate audio beneath sessions/")
@@ -191,6 +214,64 @@ def run(argv: list[str] | None = None) -> int:
     except ConfigurationError as error:
         print(f"Configuration error: {error}", file=sys.stderr)
         return EXIT_CONFIGURATION_ERROR
+    if args.command in {"transcribe", "status", "review"}:
+        from session_pipeline import workflow
+        from session_pipeline.artifacts import read_artifact
+
+        try:
+            if args.command == "review":
+                sid = workflow.resolve_session(args.input)
+                report = read_artifact(workflow.receipt_path(config, sid))
+                gate = report.get("gate")
+                if report["state"] != "WAITING_FOR_USER" or gate not in {
+                    "SPEAKER_IDENTITY",
+                    "ASR_REVIEW",
+                }:
+                    raise ValueError("no pending human review gate")
+                fp = workflow.selected_review(config, sid, gate)
+                if gate == "SPEAKER_IDENTITY":
+                    from session_pipeline.speaker_review import serve_review
+
+                    serve_review(config, sid, fp, open_browser=args.open)
+                else:
+                    from session_pipeline.review_server import serve_review
+
+                    serve_review(config, sid, fp, 8765, args.open)
+                return EXIT_SUCCESS
+            if args.command == "status":
+                report = workflow.status(config, args.input)
+                _emit(report if args.json else workflow.human_summary(report), json_mode=args.json)
+            else:
+                report = workflow.transcribe(
+                    config,
+                    args.input,
+                    profile=args.profile,
+                    policy=args.review_policy,
+                    dry_run=args.dry_run,
+                    progress=None if args.json else lambda stage: print(f"{stage}...", flush=True),
+                )
+                if args.json:
+                    _emit(report, json_mode=True)
+                else:
+                    for session in report["sessions"]:
+                        print(workflow.human_summary(session))
+                    if report["unprocessed"]:
+                        print(f"Batch stopped; {len(report['unprocessed'])} session(s) pending.")
+            state = report["state"]
+            if args.command == "transcribe" and args.dry_run:
+                return EXIT_SUCCESS
+            return {
+                "SUCCEEDED": 0,
+                "SUCCEEDED_WITH_WARNINGS": 0,
+                "WAITING_FOR_USER": 7,
+                "BLOCKED_MODEL_PROVISIONING": 6,
+                "INTERRUPTED": 130,
+                "PENDING": 0,
+                "RUNNING": 0,
+            }.get(state, EXIT_INPUT_INVALID)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            print(f"Workflow failed: {error}", file=sys.stderr)
+            return EXIT_INPUT_INVALID
     if args.command == "final":
         from session_pipeline import final_render
 

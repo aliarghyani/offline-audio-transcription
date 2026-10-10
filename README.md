@@ -1,132 +1,152 @@
-# Persian Session Transcription — local pipeline
+# Local Persian session transcription
 
-This repository is the privacy-first foundation for a local Persian session
-transcription pipeline. Phase 3A implements source discovery, full input integrity
-validation, canonical JSON artifacts, stage fingerprints, checkpoint contracts,
-and typed QA concepts. Phase 3B provisions CPU ML software and adds an offline
-environment doctor. Phase 3C adds explicit pinned model-file provisioning and
-offline verification. Phase 4A adds deterministic ASR review and an explicit local
-targeted-retry worker; see [ASR quality and retry](docs/ASR_QUALITY.md).
-QA review/status and default retry planning do not load inference models.
-Only `qa retry --execute` starts local retry inference. Runtime requires no
-Codex session, OpenAI API, LLM API, cloud prompts or ChatGPT tokens.
-No psychological or therapy-content interpretation belongs in this repository.
+Transcribe a new recording on Windows, using pinned CPU models:
 
-Phase 4B adds a [local human A/B review UI and safe reviewed merge](docs/HUMAN_REVIEW.md).
-Start with `session-pipeline qa review build <session-id>`, then
-`session-pipeline qa review serve <session-id> --port 0 --open`. Decisions persist
-locally. `qa merge` requires completed review and writes a separate reviewed
-lineage; original raw transcripts are preserved.
+```powershell
+uv run --offline --no-sync session-pipeline transcribe .\sessions\session5.m4a --profile full
+# Equivalent PowerShell wrapper:
+.\scripts\run.ps1 transcribe .\sessions\session5.m4a -Profile full
+```
 
-Phase 4C adds [resumable Persian forced alignment](docs/ALIGNMENT.md) from the
-accepted reviewed lineage. `session-pipeline align <session-id>` plans only;
-`--execute --smoke` runs a separate bounded smoke, and `--execute` explicitly
-runs/resumes full local alignment. `--status` is read-only and loads no model.
+- **full** (default): ASR → QA → bounded retry → reviewed transcript → Persian alignment
+  → whole-session two-speaker diarization → anonymous attribution → human identity gate
+  → labelled final JSON/TXT. Use this for your normal two-person session.
+- **quality**: the same stages through alignment, producing aligned JSON and readable TXT
+  without speaker labels.
+- **fast**: integrity → ASR → raw JSON/TXT. Lowest processing cost; no downstream QA/retry.
 
-## Private data boundary
+The source is hashed and fully checked with FFmpeg **before inference**. Its bytes are
+never changed. Spaces, Persian filenames, external files and nested recordings work;
+external/nested input gets an automatic private content-addressed copy under `sessions/`.
+Supported extensions: M4A, MP4, MP3, WAV, FLAC, OGG, OPUS, AAC, WMA.
 
-Put future recordings in `sessions/` and leave each original file unchanged.
-The source filename may contain spaces or Persian Unicode; the internal session
-ID comes from the source SHA-256. `sessions/`, `reference_transcripts/`, `work/`,
-`outputs/`, caches, and credentials are excluded from Git. Historical reference
-transcripts must not influence fresh ASR. See [privacy](docs/PRIVACY.md).
+**Interrupted? Run the same command again.** Verified completed stages are reused.
+Alignment units and retry windows resume; complete native diarization is saved before
+validation and reused after an interruption. A stale RUNNING workflow becomes
+INTERRUPTED on read-only status and is recovered on the next run. Incomplete initial
+ASR may restart decoding; partial diagnostics never count as a completed transcript.
 
-The recording present during Phase 3A is structurally incomplete: its declared
-`mdat` size extends beyond the physical file, `moov` is absent, and FFmpeg cannot
-open it for decoding. It is retained unchanged as a local negative integrity
-case. Re-copy or re-export from the original source to a separate file before
-any future transcription attempt.
+**Identify speakers:** FULL stops at `WAITING_FOR_USER: SPEAKER_IDENTITY` and prints one
+exact `uv run --no-sync session-pipeline review <session-id> --open` command. Run it,
+listen to local samples, explicitly confirm the Ali/consultant mapping, then stop the
+review server with Ctrl+C and repeat the original `transcribe` command. Fingerprints
+are resolved from the saved workflow; you do not need to remember them. Identities
+are never inferred from text, names, speaking time or voice guesses.
 
-## Bootstrap on Windows
+**Find the TXT:** completion prints absolute `TXT:` and `JSON:` paths. FULL writes
+`outputs/<session-id>/final/<lineage>/transcript.final.fa.txt` and `.json`.
+FAST writes `outputs/<session-id>/transcript.raw.fa.txt` and `.json`;
+QUALITY writes `outputs/<session-id>/aligned/<lineage>/transcript.aligned.fa.txt`
+and `.json`. The profile and review policy persist in `work/<session-id>/workflow.json`.
 
-Use Python 3.11, `uv`, and FFmpeg/ffprobe on `PATH`:
+**Cloud and internet:** no ChatGPT, cloud LLM, API key, paid service or active coding
+agent is needed at runtime. Inference is local and denies network connections.
+Internet is needed once to install software and explicitly provision models.
+Normal transcription/status never downloads models or asks for HF_TOKEN.
+
+## One-time setup
+
+Use Python 3.11, uv, and FFmpeg/ffprobe available on PATH:
 
 ```powershell
 uv sync --locked --dev --python 3.11
-uv run --no-sync session-pipeline version
+uv run --no-sync session-pipeline doctor
+uv run --no-sync session-pipeline models provision --role asr
+uv run --no-sync session-pipeline models provision --role alignment
 ```
 
-The checked-in lock installs the Phase 3B software stack. `torch`, `torchaudio`,
-and `torchvision` resolve through explicit source mappings to the official
-[PyTorch CPU index](https://download.pytorch.org/whl/cpu). See the exact validated
-versions and dependency decisions in [ML runtime](docs/ML_RUNTIME.md).
+FULL also needs the gated Community-1 files: accept its official access conditions,
+provide an authorized HF_TOKEN only in the provisioning process environment, then:
 
-### Windows shared FFmpeg runtime
+```powershell
+uv run --no-sync session-pipeline models provision --role diarization
+# Remove the provisioning token from this PowerShell process after provisioning:
+Remove-Item Env:HF_TOKEN -ErrorAction SilentlyContinue
+uv run --offline --no-sync session-pipeline models verify
+```
 
-The CLI integrity checks use `ffmpeg.exe` and `ffprobe.exe` found on `PATH`.
-TorchCodec 0.7.0 separately needs FFmpeg 4–7 shared libraries; an executable-only
-FFmpeg distribution does not satisfy that requirement. This machine uses the
-trusted **Gyan.FFmpeg.Shared 7.1.1** WinGet package at user scope:
+Never paste tokens into commands, config or chat. See [model provisioning](docs/MODEL_PROVISIONING.md)
+for exact locked revisions and access conditions. Local status is read-only; offline
+`models verify` hashes files and refreshes local receipts. Missing/corrupt/unverified
+required files produce `BLOCKED_MODEL_PROVISIONING` with the exact provisioning command.
+Receipt checks inspect all profile model roles before execution; loaders additionally
+verify full payload checksums before loading. Completed verified stages need no model load.
+
+TorchCodec 0.7.0 requires FFmpeg 4–7 **shared** libraries separately from CLI FFmpeg.
+The supported user-scope Windows installation (no administrator rights):
 
 ```powershell
 winget install --id Gyan.FFmpeg.Shared --exact --version 7.1.1 --scope user --source winget --accept-package-agreements --accept-source-agreements --disable-interactivity
 ```
 
-The original yt-dlp FFmpeg distribution is preserved. The doctor discovers the
-shared build's real `bin` directory and registers it with `os.add_dll_directory`
-inside fresh Python child processes. It keeps the registration alive through
-import and decoding. No DLL is copied into site-packages and no binary is
-patched. Arbitrary DLL downloads/copies are prohibited because their provenance
-and ABI compatibility are unknown. WinGet may change user PATH; the doctor
-reports whichever executables the current shell actually resolves.
+See [runtime details](docs/ML_RUNTIME.md). The doctor reports environment readiness;
+it does not run transcription or prove future performance/RAM fit.
 
-## Current commands
+## Review policy, status and batch
+
+The default **auto-prefer-retry** reuses Session 4's `AUTO_PREFER_B` policy: choose a
+structurally usable bounded retry candidate, recover words from padded context where
+safe, otherwise retain A. This avoids dozens of manual A/B clicks while pursuing
+accuracy. It is explicitly **automatic, not human verification**; acoustic accuracy
+is not guaranteed. Unselected entries beyond the 900-second decoded retry budget remain
+in A with warnings; targeted retries never escalate to a full ASR rerun.
+
+`--review-policy conservative` runs the bounded retry but retains original A text.
+`--review-policy human` opens a separate resumable A/B gate when retry targets exist;
+it requires resolved decisions before structural acceptance/alignment. With no retry
+targets, all policies retain raw text without claiming human verification.
+Alignment lexical failures remain PARTIAL with warnings and preserved words.
+`--speakers 2` is the only supported count for the current product.
 
 ```powershell
-uv run --no-sync session-pipeline version
-uv run --no-sync session-pipeline discover
-uv run --no-sync session-pipeline discover --json
-uv run --no-sync session-pipeline config show --json
-uv run --no-sync session-pipeline doctor
-uv run --no-sync session-pipeline doctor --json
-uv run --no-sync session-pipeline models status --json
-uv run --no-sync session-pipeline models provision
-uv run --no-sync session-pipeline models verify
-uv run --no-sync session-pipeline integrity "sessions\example.m4a"
-& .\scripts\run.ps1 integrity "sessions\example.m4a" --json
+uv run --offline --no-sync session-pipeline status .\sessions\session5.m4a
+uv run --offline --no-sync session-pipeline status <session-id> --json
+uv run --offline --no-sync session-pipeline transcribe .\sessions --profile full
+uv run --offline --no-sync session-pipeline transcribe .\sessions\session5.m4a --profile full --dry-run
 ```
 
-`discover` only traverses `sessions/`. `integrity` hashes, probes, and fully
-decodes into FFmpeg's null muxer without writing media. It exits non-zero for an
-invalid input. Versioned integrity JSON and bounded diagnostics are written
-under ignored `work/<session-id>/`. The source is never modified. JSON mode
-returns structured results without raw FFmpeg diagnostic text.
+Status verifies saved files without loading models or contacting the network, and
+recognizes an existing pre-productization final lineage read-only. Multiple historical
+final lineages require explicit engineering selection; no arbitrary newest-file guess.
+`--json` gives detailed machine-readable output. Default output reports stage runtime,
+reuse, warnings, gates and output paths. Runtime displayed on reused stages is the
+recorded stage runtime, not a new inference duration.
 
-`doctor` imports each ML component in a fresh offline process, checks CPU-only
-PyTorch, CTranslate2 INT8, WhisperX mappings/signatures, and decodes a generated
-temporary tone with TorchCodec. It never reads sessions or reference transcripts,
-calls an inference model loader, or uses a token value. PASS/FAIL describe the
-software checks; WARN leaves inference compatibility, gated access and RAM fit untested.
-Model packages installed **does not mean the requested inference models are
-provisioned**. Phase 3B initiated no model repository or separate weight download.
-The standard WhisperX wheel includes the explicitly approved bundled VAD
-checkpoint (17,719,103 bytes), installed but never loaded in Phase 3B. External
-model downloads and model loading/inference were prohibited and did not occur;
-see the classification in [ML runtime](docs/ML_RUNTIME.md).
+Directory batches run **sequentially** on this 16 GB machine. Discovery sorts paths,
+ignores symlinks/unsupported files and deduplicates identical audio. The batch stops
+at the first human gate, model block, interruption or failure and reports unprocessed
+files. After resolving the gate, repeat the same batch command.
 
-Phase 3C separately downloads approved external model files through explicit
-`models provision`. See [model provisioning](docs/MODEL_PROVISIONING.md) for exact
-revisions, licenses, local storage, gated access and the future offline contract.
-ASR/alignment are provisioned; Community-1 is BLOCKED_AUTH until its official
-conditions are accepted and an authorized HF_TOKEN is available in the process
-environment. Model status never downloads. Verification hashes local files only.
+Exit codes: 0 completed/planned, 2 CLI usage, 3 input/stage failure, 4 configuration,
+5 doctor environment failure, 6 model provisioning block, 7 waiting for human review,
+130 interrupted. The wrapper preserves these codes and visible errors.
 
-Current exit codes: `0` success (including doctor WARN), `2` CLI usage,
-`3` invalid input/discovery, `4` configuration error, and `5` doctor software
-failure, and `6` models incomplete/blocked/corrupt. Doctor exposes separate
-`software_ready`, `models_ready`, and `transcription_ready` fields. At the Phase 3C
-checkpoint, the damaged source was unsuitable for transcription. No ASR, alignment,
-diarization, speaker mapping or rendering command existed in that Phase 3C snapshot.
+## Configuration, privacy and engineering
 
-Current Phase 4D adds development-tested `diarize --plan/--status/--execute`
-surfaces and separate anonymous speaker-turn artifacts. Session 4 has a plan only;
-the gated diarization model remains unavailable. See [diarization](docs/DIARIZATION.md)
-for the whole-session clustering decision, offline runtime contract, manual
-provisioning/smoke/full commands, QA, and interruption behavior. No real diarization
-or speaker identity assignment was performed during development.
+Defaults are centralized in `config/defaults.json` (Persian, CPU INT8, models, two speakers),
+`config/models.lock.json` (immutable revisions/public file identities),
+`config/asr-quality.json` (QA thresholds), and `product_defaults.py` (profile, review
+policy, 900-second retry budget, shared decode options, 0.75-second turn grouping,
+offline contract). Stage fingerprints include relevant settings/models/parents;
+changing policy reuses ASR but creates a different reviewed/downstream lineage.
+The frozen model/device contracts are validated rather than silently substituted.
+Changed/corrupt canonical raw ASR is preserved and fails clearly; use a separate
+workspace for a deliberately changed ASR model/decode contract.
 
-## Architecture
+`sessions/`, `outputs/`, `work/`, `models/`, `reference_transcripts/`, caches and secrets
+remain ignored. Reference transcript content never conditions fresh ASR; its directory
+is rejected as input. No private recording/transcript is stored in tests.
 
-The accepted stage design and invalidation rules are in
-[architecture](docs/ARCHITECTURE.md). Artifact checksums and schema rules are in
-[artifacts](docs/ARTIFACTS.md). Historical workflow files live in `legacy/`.
+See [workflow design and acceptance](docs/WORKFLOW.md), [architecture](docs/ARCHITECTURE.md),
+[artifacts](docs/ARTIFACTS.md), [privacy](docs/PRIVACY.md), [ASR QA](docs/ASR_QUALITY.md),
+[alignment](docs/ALIGNMENT.md), [diarization](docs/DIARIZATION.md),
+[attribution](docs/ATTRIBUTION.md), and [final rendering](docs/FINAL_TRANSCRIPT.md).
+
+```powershell
+uv lock --check --offline
+uv run --offline --no-sync pytest
+uv run --offline --no-sync ruff check .
+```
+
+Product acceptance uses synthetic audio/artifacts and injected inference functions;
+real ML throughput, RAM fit and accuracy on future recordings remain to be measured.

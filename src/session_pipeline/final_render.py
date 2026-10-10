@@ -17,6 +17,7 @@ from session_pipeline.asr_quality import session_paths
 from session_pipeline.asr_retry import exclusive_lock
 from session_pipeline.fingerprint import stage_fingerprint
 from session_pipeline.models import sha256_file
+from session_pipeline.product_defaults import TURN_GROUP_GAP_SECONDS
 from session_pipeline.review_merge import write_text_atomic
 
 require = attribution.require
@@ -24,7 +25,7 @@ UNKNOWN = "نامشخص"
 POLICY = {
     "renderer_version": 1,
     "text_policy": "EXACT_SOURCE_CHARACTER_SLICES_OR_EXACT_PARENT_BLOCK",
-    "maximum_group_gap_seconds": 0.75,
+    "maximum_group_gap_seconds": TURN_GROUP_GAP_SECONDS,
     "cross_segment_grouping": "SINGLE_SPEAKER_ONLY",
     "overlap_grouping": False,
     "speaker_change_grouping": False,

@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from session_pipeline import product_defaults
+
 
 class ConfigurationError(ValueError):
     """The configuration does not satisfy the Phase 3A contract."""
@@ -163,6 +165,14 @@ class AppConfig:
             "pipeline": vars(self.pipeline),
             "ml": vars(self.ml),
             "qa": vars(self.qa),
+            "workflow": {
+                "profile": product_defaults.DEFAULT_PROFILE,
+                "review_policy": product_defaults.DEFAULT_REVIEW_POLICY,
+                "retry_budget_seconds": product_defaults.RETRY_BUDGET_SECONDS,
+                "turn_group_gap_seconds": product_defaults.TURN_GROUP_GAP_SECONDS,
+                "offline": product_defaults.OFFLINE,
+                "asr_decode": product_defaults.ASR_DECODE,
+            },
         }
 
 
