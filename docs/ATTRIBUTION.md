@@ -130,6 +130,9 @@ There is no final-output CLI or file publisher in this phase. A later renderer c
 write `transcript.final.fa.json` and TXT using `[HH:MM:SS — HH:MM:SS] <human label>:`
 after the human mapping and rendering policy are accepted.
 
+Phase 4F now implements that later step; see `FINAL_TRANSCRIPT.md` for its persisted
+mapping gate, exact-text proof, conservative grouping policy and final-render CLI.
+
 Metadata QA and synthetic tests do not establish actual voice identity or the
 linguistic correctness of earlier ML output. The remaining action is human listening
 and explicit mapping. Session 4 must remain unmapped during Phase 4E implementation.

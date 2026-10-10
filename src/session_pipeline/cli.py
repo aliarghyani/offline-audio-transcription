@@ -103,6 +103,16 @@ def _parser() -> argparse.ArgumentParser:
     attribute.add_argument("--diarization-fingerprint")
     attribute.add_argument("--fingerprint", help="existing attribution fingerprint for status")
     attribute.add_argument("--json", action="store_true")
+    final = commands.add_parser("final", help="deterministic human-labelled final transcript")
+    final_commands = final.add_subparsers(dest="final_command", required=True)
+    render = final_commands.add_parser("render")
+    render.add_argument("session_id")
+    render.add_argument("--attributed-fingerprint", required=True)
+    render.add_argument("--json", action="store_true")
+    final_status = final_commands.add_parser("status")
+    final_status.add_argument("session_id")
+    final_status.add_argument("--fingerprint")
+    final_status.add_argument("--json", action="store_true")
     speakers = commands.add_parser("speakers", help="local human speaker identity review")
     speaker_commands = speakers.add_subparsers(dest="speaker_command", required=True)
     speaker_status = speaker_commands.add_parser("status")
@@ -181,6 +191,22 @@ def run(argv: list[str] | None = None) -> int:
     except ConfigurationError as error:
         print(f"Configuration error: {error}", file=sys.stderr)
         return EXIT_CONFIGURATION_ERROR
+    if args.command == "final":
+        from session_pipeline import final_render
+
+        try:
+            if args.final_command == "render":
+                report = final_render.execute(config, args.session_id, args.attributed_fingerprint)
+            else:
+                report = final_render.status(config, args.session_id, args.fingerprint)
+            _emit(
+                report if args.json else json.dumps(report, ensure_ascii=False, indent=2),
+                json_mode=args.json,
+            )
+            return EXIT_SUCCESS
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            print(f"Final rendering/status failed: {type(error).__name__}", file=sys.stderr)
+            return EXIT_INPUT_INVALID
     if args.command in {"attribute", "speakers"}:
         from session_pipeline import attribution, speaker_review
 
