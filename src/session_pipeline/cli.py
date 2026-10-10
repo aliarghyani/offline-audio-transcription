@@ -94,6 +94,31 @@ def _parser() -> argparse.ArgumentParser:
         "--fingerprint", help="existing diarization plan fingerprint (status only)"
     )
     diarize.add_argument("--json", action="store_true")
+    attribute = commands.add_parser("attribute", help="deterministic anonymous speaker attribution")
+    attribute.add_argument("session_id")
+    attribute_mode = attribute.add_mutually_exclusive_group()
+    attribute_mode.add_argument("--execute", action="store_true")
+    attribute_mode.add_argument("--status", action="store_true")
+    attribute.add_argument("--aligned-fingerprint")
+    attribute.add_argument("--diarization-fingerprint")
+    attribute.add_argument("--fingerprint", help="existing attribution fingerprint for status")
+    attribute.add_argument("--json", action="store_true")
+    speakers = commands.add_parser("speakers", help="local human speaker identity review")
+    speaker_commands = speakers.add_subparsers(dest="speaker_command", required=True)
+    speaker_status = speaker_commands.add_parser("status")
+    speaker_status.add_argument("session_id")
+    speaker_status.add_argument("--fingerprint")
+    speaker_status.add_argument("--json", action="store_true")
+    speaker_review = speaker_commands.add_parser("review")
+    speaker_reviews = speaker_review.add_subparsers(dest="speaker_review_command", required=True)
+    for name in ("build", "serve"):
+        command = speaker_reviews.add_parser(name)
+        command.add_argument("session_id")
+        command.add_argument("--fingerprint")
+        command.add_argument("--json", action="store_true")
+        if name == "serve":
+            command.add_argument("--port", type=int, default=8766)
+            command.add_argument("--open", action="store_true")
     models = commands.add_parser("models", help="manage pinned model files without inference")
     model_commands = models.add_subparsers(dest="model_command", required=True)
     for name in ("status", "provision", "verify"):
@@ -156,6 +181,47 @@ def run(argv: list[str] | None = None) -> int:
     except ConfigurationError as error:
         print(f"Configuration error: {error}", file=sys.stderr)
         return EXIT_CONFIGURATION_ERROR
+    if args.command in {"attribute", "speakers"}:
+        from session_pipeline import attribution, speaker_review
+
+        try:
+            if args.command == "attribute":
+                if args.status:
+                    if args.aligned_fingerprint or args.diarization_fingerprint:
+                        raise ValueError("status uses --fingerprint only")
+                    report = attribution.status(config, args.session_id, args.fingerprint)
+                else:
+                    if args.fingerprint:
+                        raise ValueError("--fingerprint requires --status")
+                    if args.execute:
+                        report = attribution.execute(
+                            config,
+                            args.session_id,
+                            args.aligned_fingerprint,
+                            args.diarization_fingerprint,
+                        )
+                    else:
+                        path, document = attribution.make_document(
+                            config,
+                            args.session_id,
+                            args.aligned_fingerprint,
+                            args.diarization_fingerprint,
+                        )
+                        report = {"state": "PLANNED", "artifact_path": str(path), **document["qa"]}
+            elif args.speaker_command == "status":
+                report = speaker_review.status(config, args.session_id, args.fingerprint)
+            elif args.speaker_review_command == "serve":
+                speaker_review.serve_review(
+                    config, args.session_id, args.fingerprint, args.port, args.open
+                )
+                return EXIT_SUCCESS
+            else:
+                report = speaker_review.build_bundle(config, args.session_id, args.fingerprint)
+            _emit(report if args.json else json.dumps(report, indent=2), json_mode=args.json)
+            return EXIT_SUCCESS
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            print(f"Speaker attribution/review failed: {type(error).__name__}", file=sys.stderr)
+            return EXIT_INPUT_INVALID
     if args.command == "diarize":
         from session_pipeline import diarization
 

@@ -1,0 +1,22 @@
+:root {color-scheme: light; font-family: Tahoma, sans-serif; color: #1f3032; background: #f4f6f3;}
+* {box-sizing: border-box;}
+body {margin: 0; padding: 36px 20px;}
+main {max-width: 1020px; margin: auto;}
+h1 {font-size: clamp(24px, 4vw, 36px); line-height: 1.6; margin: 8px 0;}
+p {line-height: 1.9;}
+.eyebrow, .note {color: #566862;}
+#speakers {display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; margin: 28px 0;}
+section {background: white; border: 1px solid #d9e3db; border-radius: 16px; padding: 24px;}
+h2 {font: 600 20px monospace; text-align: left; margin: 0 0 24px;}
+audio {width: 100%; display: block; direction: ltr;}
+section p {margin: 22px 0 8px; color: #53635d; font-size: 14px;}
+label {display: block; line-height: 2;}
+section label {margin-top: 28px;}
+select {width: 100%; padding: 12px; border: 1px solid #7b9187; border-radius: 8px; font: inherit; background: white;}
+.confirmation {margin: 24px 0 18px;}
+input {width: 18px; height: 18px; vertical-align: middle;}
+button {border: 0; border-radius: 8px; padding: 14px 24px; background: #195b47; color: white; font: inherit; cursor: pointer;}
+button:disabled {background: #d9e0dc; color: #52645c; cursor: default;}
+:focus-visible {outline: 3px solid #c4852c; outline-offset: 4px;}
+#status {min-height: 36px; color: #195b47;}
+@media (max-width: 700px) {#speakers {grid-template-columns: 1fr;} body {padding: 20px 14px;} section {padding: 20px;}}
