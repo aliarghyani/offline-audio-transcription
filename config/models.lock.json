@@ -126,21 +126,21 @@
           "git_blob_sha1": "8356d6634d7b1074581dd36e2225887ec809326e",
           "path": "README.md",
           "required": false,
-          "sha256": null,
+          "sha256": "2db91f9265bd81f1653ff088b5bff22bf6aebebea03328513af65501643f8a31",
           "size_bytes": 9978
         },
         {
           "git_blob_sha1": "4022db43960736338378fdb6b5a85cfdae198910",
           "path": "config.yaml",
           "required": true,
-          "sha256": null,
+          "sha256": "5ce2bfa9a938dc132cec1172592d65173cbb8f444ea1e4133f10f9391de155be",
           "size_bytes": 444
         },
         {
           "git_blob_sha1": "d71f943e00016652680bef1e6c49fbc842e0d4c4",
           "path": "embedding/README.md",
           "required": false,
-          "sha256": null,
+          "sha256": "fa9e5105ae95edb231d841476cdb91eef4be0621c372ed4f7d3421294b5f8ad7",
           "size_bytes": 938
         },
         {
@@ -154,7 +154,7 @@
           "git_blob_sha1": "5c01ad2e673203fe32a82d7a140eb817db9930b7",
           "path": "plda/README.md",
           "required": false,
-          "sha256": null,
+          "sha256": "e1316dbbeb3261431478d48ceebbd4bba395c3587e7b80c254dbab00f1209d0a",
           "size_bytes": 220
         },
         {
