@@ -202,3 +202,66 @@ Executed local verification after the waveform adapter change:
 The graph service returned `Transport closed`; exact source and executable
 verification supplied the evidence. Real model loading, smoke/full inference,
 RAM fit, wall time, and diarization accuracy remain NOT RUN.
+
+## Phase 4D.2: lossless persistence and bounds recovery
+
+The preceding plan-only evidence is historical. Session 4 subsequently returned
+1511 full regular turns but failed validation on one OUT_OF_BOUNDS_TURN. The old
+runner saved only QA on failure, so those full turns cannot be recovered from
+that checkpoint. The smoke output is not a substitute for the full recording.
+
+Execution now atomically writes a checksum-sealed `raw-inference.json` alongside
+the plan immediately after the engine returns, before validation. This immutable
+artifact contains regular turns, optional exclusive turns (null when unavailable),
+labels, source checksum/duration, processed interval, aligned parent identities,
+model/revision, exact configuration, plan checksum, input checksums, and execution
+attempt/start/completion/wall time/model inventory. Nonfinite floats use the
+lossless `{"__raw_nonfinite_float__": "nan" | "inf" | "-inf"}` JSON encoding;
+validation still rejects them. Raw values are never clipped or overwritten.
+
+Canonical turns are separate copies intersected with the processed audio domain:
+`[0, source_duration]` for FULL; `[0, min(180, source_duration)]` for SMOKE.
+Positive intersections are retained with recalculated duration when clipped.
+`RAW_OUT_OF_BOUNDS_TURN`, `CLIPPED_TO_AUDIO_BOUNDS`, and per-turn raw/canonical
+timestamps explicitly expose clipping. Empty intersections, nonfinite values,
+invalid labels/order/duration, or failure to find exactly two anonymous regular
+speakers still block publication. No turn is silently dropped, expanded to cover
+a transcript, or assigned a guessed speaker. Regular overlap is preserved;
+exclusive output, when exposed, is separately persisted and validated.
+
+Uncovered reviewed bounds, short turns, and long uncovered intervals remain QA
+warnings with explicit IDs/counts. A valid result is SUCCEEDED_WITH_WARNINGS when
+any coverage/short-turn/clipping warnings exist; otherwise it is SUCCEEDED.
+FAILED checkpoints distinguish execution_state INFERENCE_FAILED from
+RAW_PERSISTED_VALIDATION_FAILED. Persistence failure after model return is
+INFERENCE_COMPLETED_RAW_PERSISTENCE_FAILED. Interruptions remain INTERRUPTED;
+status detects stale RUNNING without mutating files. Saved raw output is reused
+on the next execution call without model loading or audio decoding, including
+after interruption. Invalid/corrupt raw lineage blocks inference rather than
+overwriting evidence. Before-return interruption has no fabricated raw output.
+
+Status reads lineage/artifacts only: it does not load or inspect model weights,
+download, or access the network. Model availability is UNKNOWN unless verification
+is recorded in a completed result (VERIFIED_AT_EXECUTION, not a current check).
+Use the separate models command for fresh model inventory verification. Status
+exposes inference/raw persistence, counts, validation, clipping, structural QA,
+attribution warnings, and actual/expected canonical paths independently.
+
+Session 4 needs one operator-run full inference because its old payload is
+missing. These commands are instructions only; Codex must not execute inference:
+
+```powershell
+Set-Location -LiteralPath 'E:\personal\transcripts'
+uv run --no-sync session-pipeline diarize s-d57224782d66f69a7446 --execute --aligned-fingerprint 4ba81b10c2e0daff7708ce89c7bcb0b504c8935702d48ee2a4337063554e96f9 --json
+```
+
+Read-only status for the existing full fingerprint:
+
+```powershell
+Set-Location -LiteralPath 'E:\personal\transcripts'
+uv run --no-sync session-pipeline diarize s-d57224782d66f69a7446 --status --fingerprint 41031dbf581439b2afb2c842096a129c0b652e360bab710a533cc16dc8ab11eb --json
+```
+
+No attribution, transcript modification, or real identity assignment is part of
+this phase. Bounds clipping is a recovery policy, not a guarantee that the old
+unpersisted out-of-bounds turn would have been recoverable.

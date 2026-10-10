@@ -137,7 +137,7 @@ def test_pinned_local_model_contract_enforced_before_inference(
         store.write_json(root / "config/models.lock.json", lock)
     factory = Mock(side_effect=AssertionError("no inference"))
     report = d.run_diarization(project_config, sid, engine_factory=factory, extractor=Mock())
-    assert report["state"] == "FAILED" and report["model_status"] == "CORRUPT"
+    assert report["state"] == "FAILED" and report["model_status"] == "UNKNOWN"
     factory.assert_not_called()
 
 
@@ -148,7 +148,7 @@ def test_overlap_preserved_complete_result_reused_and_inputs_immutable(
     *_, files = d.load_input(project_config, sid)
     before = {p: (sha256_file(p), p.stat().st_mtime_ns) for p in files}
     report = execute(project_config, sid)
-    assert report["state"] == "SUCCEEDED" and report["full_diarization_complete"]
+    assert report["state"] == "SUCCEEDED_WITH_WARNINGS" and report["full_diarization_complete"]
     assert (
         report["model_provisioned"]
         and report["verified_revision"] == d.MODEL["diarization"]["revision"]
@@ -389,7 +389,7 @@ def test_offline_adapter_cpu_pinned_path_two_speakers_and_regular_overlap(
     pipeline = Mock(
         return_value=SimpleNamespace(
             speaker_diarization=annotation,
-            exclusive_speaker_diarization=Mock(side_effect=AssertionError("exclusive")),
+            exclusive_speaker_diarization=annotation,
         )
     )
     loader = Mock(return_value=pipeline)
@@ -414,9 +414,10 @@ def test_offline_adapter_cpu_pinned_path_two_speakers_and_regular_overlap(
     assert audio["waveform"].dtype == np.float32
     assert audio["waveform"][0].tolist() == [-1, 0, 32767 / 32768]
     assert pipeline.call_args.kwargs == {"min_speakers": 2, "max_speakers": 2}
-    assert output[0]["end"] > output[1]["start"]
+    assert output["turns"][0]["end"] > output["turns"][1]["start"]
+    assert output["exclusive_turns"] == output["turns"]
     assert pipeline.embedding_batch_size == 8 and pipeline.segmentation_batch_size == 4
-    assert set(output[0]) == {"start", "end", "speaker", "duration"}
+    assert set(output["turns"][0]) == {"start", "end", "speaker", "duration"}
 
 
 @pytest.mark.parametrize(
@@ -550,3 +551,214 @@ print('PASS')
 """
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert result.returncode == 0 and result.stdout.strip() == "PASS"
+
+
+@pytest.mark.parametrize("boundary", ["start", "end"])
+def test_raw_before_validation_and_clipping(
+    aligned, local_model, project_config, monkeypatch, boundary
+):
+    sid, _, _, _ = aligned
+    payload = turns()
+    if boundary == "start":
+        payload[0]["start"] = -0.025
+    else:
+        payload[1]["end"] = 620.025
+    payload = {
+        "turns": payload,
+        "exclusive_turns": [
+            {"start": -0.025, "end": 100, "speaker": "SPEAKER_00"},
+            {"start": 100, "end": 620.025, "speaker": "SPEAKER_01"},
+        ],
+    }
+    p, plan = d.make_plan(project_config, sid)
+    originals = d.load_input(project_config, sid)[-1]
+    baseline = {v: (v.read_bytes(), v.stat().st_mtime_ns) for v in originals}
+    evaluate = d.evaluate_turns
+
+    def checked(turns, plan):
+        assert read_artifact(d.raw_path(p))["turns"] == payload["turns"]
+        return evaluate(turns, plan)
+
+    monkeypatch.setattr(d, "evaluate_turns", checked)
+    report = d.run_diarization(
+        project_config, sid, engine_factory=lambda _: lambda clip: payload, extractor=fake_extract
+    )
+    raw = d.read_raw(p, plan)
+    result = read_artifact(Path(report["output_path"]))
+    assert raw["turns"] == payload["turns"]
+    assert raw["exclusive_turns"] == payload["exclusive_turns"]
+    assert result["exclusive_turns"][0]["start"] == 0
+    assert result["exclusive_turns"][1]["end"] == 620
+    assert result["raw_anomalies"]["RAW_OUT_OF_BOUNDS_TURN"] == 1
+    assert result["raw_anomalies"]["CLIPPED_TO_AUDIO_BOUNDS"] == 1
+    clipping = result["raw_anomalies"]["clipped_turns"][0]
+    assert clipping["raw_start"] == payload["turns"][clipping["turn_index"]]["start"]
+    assert clipping["raw_end"] == payload["turns"][clipping["turn_index"]]["end"]
+    assert all(0 <= t["start"] < t["end"] <= 620 for t in result["turns"])
+    assert result["qa"]["error_counts"]["OUT_OF_BOUNDS_TURN"] == 0
+    assert result["qa"]["overlap_seconds"] > 0
+    assert report["state"] == "SUCCEEDED_WITH_WARNINGS"
+    assert report["raw_turn_count"] == report["regular_turn_count"] == 2
+    assert report["exclusive_turn_count"] == 2 and report["clipping_count"] == 1
+    assert baseline == {v: (v.read_bytes(), v.stat().st_mtime_ns) for v in originals}
+
+
+@pytest.mark.parametrize("invalid", ["outside", "third", "one", "order", "duration"])
+def test_invalid_output_is_saved_and_reused_without_inference(
+    aligned, local_model, project_config, invalid
+):
+    sid, _, _, _ = aligned
+    payload = turns()
+    if invalid == "outside":
+        payload.append({"start": 621, "end": 622, "speaker": "SPEAKER_00"})
+    elif invalid == "third":
+        payload.append({"start": 171, "end": 172, "speaker": "SPEAKER_02"})
+    elif invalid == "one":
+        payload = payload[:1]
+    elif invalid == "order":
+        payload.reverse()
+    else:
+        payload[0]["duration"] = 3
+    report = d.run_diarization(
+        project_config, sid, engine_factory=lambda _: lambda clip: payload, extractor=fake_extract
+    )
+    p, plan = d.make_plan(project_config, sid)
+    raw = d.read_raw(p, plan)
+    before = d.raw_path(p).read_bytes(), d.raw_path(p).stat().st_mtime_ns
+    assert raw["turns"] == payload
+    assert report["state"] == "FAILED"
+    assert report["execution_state"] == "RAW_PERSISTED_VALIDATION_FAILED"
+    assert report["inference_completed"] and report["raw_inference_persisted"]
+    assert report["output_path"] is None
+    with d.deny_network():
+        again = d.run_diarization(
+            project_config,
+            sid,
+            engine_factory=Mock(side_effect=AssertionError("inference")),
+            extractor=Mock(side_effect=AssertionError("decode")),
+        )
+    assert again["state"] == "FAILED"
+    assert before == (d.raw_path(p).read_bytes(), d.raw_path(p).stat().st_mtime_ns)
+
+
+@pytest.mark.parametrize("interrupt_after_raw", [False, True])
+def test_interrupt_raw_recovery(
+    aligned, local_model, project_config, monkeypatch, interrupt_after_raw
+):
+    sid, _, _, _ = aligned
+    p, plan = d.make_plan(project_config, sid)
+    original = d.raw_validation
+    if interrupt_after_raw:
+        monkeypatch.setattr(d, "raw_validation", Mock(side_effect=KeyboardInterrupt))
+        factory = Mock(return_value=lambda clip: turns())
+    else:
+        factory = Mock(return_value=Mock(side_effect=KeyboardInterrupt))
+    with pytest.raises(KeyboardInterrupt):
+        d.run_diarization(project_config, sid, engine_factory=factory, extractor=fake_extract)
+    report = d.status_report(project_config, sid)
+    assert report["state"] == "INTERRUPTED"
+    assert report["raw_inference_persisted"] == interrupt_after_raw
+    assert report["inference_completed"] == interrupt_after_raw
+    assert d.raw_path(p).exists() == interrupt_after_raw
+    if interrupt_after_raw:
+        monkeypatch.setattr(d, "raw_validation", original)
+        # Simulate power loss leaving stale RUNNING after the atomic raw write.
+        cp = read_artifact(d.checkpoint_path(p))
+        cp["status"] = "RUNNING"
+        atomic_write_json(d.checkpoint_path(p), seal_artifact(cp))
+        assert d.status_report(project_config, sid)["state"] == "INTERRUPTED"
+        recovered = d.run_diarization(
+            project_config,
+            sid,
+            engine_factory=Mock(side_effect=AssertionError("model")),
+            extractor=Mock(side_effect=AssertionError("decode")),
+        )
+        assert recovered["full_diarization_complete"]
+
+
+def test_status_no_model_access_and_canonical_warnings(
+    aligned, local_model, project_config, monkeypatch
+):
+    sid, _, _, _ = aligned
+    report = execute(project_config, sid)
+    result = read_artifact(Path(report["output_path"]))
+    assert result["qa"]["warning_counts"]["UNCOVERED_REVIEWED_BOUNDS"] > 0
+    assert result["qa"]["uncovered_reviewed_segment_ids"]
+    assert result["turns"] == [dict(t, duration=t["end"] - t["start"]) for t in turns()]
+    monkeypatch.setattr(d, "inspect_model", Mock(side_effect=AssertionError("model access")))
+    monkeypatch.setattr(d, "LocalDiarizer", Mock(side_effect=AssertionError("load")))
+    monkeypatch.setattr(store, "_download", Mock(side_effect=AssertionError("download")))
+    with d.deny_network():
+        status = d.status_report(project_config, sid)
+    assert status["raw_inference_persisted"] and status["inference_completed"]
+    assert status["validation_state"] == "PASSED" and not status["models_loaded"]
+
+
+def test_success_without_warnings(aligned, local_model, project_config):
+    sid, _, _, _ = aligned
+    payload = [
+        {"start": 0, "end": 310, "speaker": "SPEAKER_00"},
+        {"start": 310, "end": 620, "speaker": "SPEAKER_01"},
+    ]
+    report = d.run_diarization(
+        project_config, sid, engine_factory=lambda _: lambda clip: payload, extractor=fake_extract
+    )
+    assert report["state"] == "SUCCEEDED" and report["processing_complete"]
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_nonfinite_output_is_preserved_before_failure(aligned, local_model, project_config, value):
+    sid, _, _, _ = aligned
+    payload = turns()
+    payload[0]["start"] = value
+    report = d.run_diarization(
+        project_config, sid, engine_factory=lambda _: lambda clip: payload, extractor=fake_extract
+    )
+    p, plan = d.make_plan(project_config, sid)
+    raw = d.read_raw(p, plan)
+    assert raw["turns"][0]["start"] == {"__raw_nonfinite_float__": repr(value)}
+    assert report["raw_inference_persisted"] and report["validation_state"] == "FAILED"
+    assert not report["processing_complete"]
+
+
+def test_raw_write_failure_is_not_misreported_as_inference_failure(
+    aligned, local_model, project_config, monkeypatch
+):
+    sid, _, _, _ = aligned
+    write = d.atomic_write_json
+
+    def fail_raw(path, document):
+        if path.name == "raw-inference.json":
+            raise OSError("synthetic disk failure")
+        return write(path, document)
+
+    monkeypatch.setattr(d, "atomic_write_json", fail_raw)
+    report = execute(project_config, sid)
+    assert report["state"] == "FAILED" and report["inference_completed"]
+    assert not report["raw_inference_persisted"]
+    assert report["execution_state"] == "INFERENCE_COMPLETED_RAW_PERSISTENCE_FAILED"
+
+
+def test_legacy_failed_checkpoint_without_raw_remains_explicit(aligned, project_config):
+    sid, _, _, _ = aligned
+    p, plan = d.make_plan(project_config, sid)
+    payload = turns()
+    payload[1]["end"] = 621
+    cp = seal_artifact(
+        {
+            "schema_version": 1,
+            "artifact_type": "diarization_checkpoint",
+            "status": "FAILED",
+            "attempt": 1,
+            "plan_checksum": plan["artifact_checksum"],
+            "parent_checksums": plan["parent_checksums"],
+            "stage_fingerprint": plan["stage_fingerprint"],
+            "failure_phase": "OUTPUT_VALIDATION",
+            "qa": d.evaluate_turns(payload, plan),
+        }
+    )
+    atomic_write_json(d.checkpoint_path(p), cp)
+    report = d.status_report(project_config, sid)
+    assert report["inference_completed"] and not report["raw_inference_persisted"]
+    assert report["execution_state"] == "INFERENCE_COMPLETED_RAW_NOT_PERSISTED"
+    assert not report["processing_complete"]

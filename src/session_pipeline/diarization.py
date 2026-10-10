@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import gc
 import importlib.metadata
+import math
 import os
 import re
 import sys
@@ -57,6 +58,7 @@ SETTINGS = {
     "long_uncovered_seconds": 30,
     "uncovered_reviewed_seconds": 1,
 }
+COMPLETE_STATES = {"SUCCEEDED", "SUCCEEDED_WITH_WARNINGS"}
 SPEAKERS = {"SPEAKER_00", "SPEAKER_01"}
 ERRORS = (
     "EMPTY_DIARIZATION",
@@ -429,18 +431,25 @@ class LocalDiarizer:
                 min_speakers=2,
                 max_speakers=2,
             )
-        # Regular diarization preserves overlap. Never substitute exclusive output.
-        annotation = result.speaker_diarization
-        turns = [
-            {
-                "start": float(turn.start),
-                "end": float(turn.end),
-                "speaker": speaker,
-                "duration": float(turn.end) - float(turn.start),
-            }
-            for turn, _, speaker in annotation.itertracks(yield_label=True)
-        ]
-        return sorted(turns, key=lambda t: (t["start"], t["end"], t["speaker"]))
+
+        # Persist both outputs; regular turns remain the overlap-preserving truth.
+        def serialize(annotation):
+            if annotation is None:
+                return None
+            return [
+                {
+                    "start": float(t.start),
+                    "end": float(t.end),
+                    "speaker": speaker,
+                    "duration": float(t.end) - float(t.start),
+                }
+                for t, _, speaker in annotation.itertracks(yield_label=True)
+            ]
+
+        return {
+            "turns": serialize(result.speaker_diarization),
+            "exclusive_turns": serialize(getattr(result, "exclusive_speaker_diarization", None)),
+        }
 
 
 def checkpoint_path(plan_path):
@@ -452,6 +461,161 @@ def checkpoint_path(plan_path):
     return path
 
 
+def raw_path(plan_path):
+    path = plan_path.parent / "raw-inference.json"
+    require(not path.is_symlink(), "raw inference cannot be a symlink")
+    return path
+
+
+def read_raw(plan_path, plan):
+    raw = read_artifact(raw_path(plan_path))
+    require(
+        raw.get("artifact_type") == "diarization_raw_inference"
+        and raw.get("status") == "INFERENCE_COMPLETED"
+        and raw.get("inference_completed") is True
+        and all(
+            raw.get(k) == plan[k]
+            for k in (
+                "session_id",
+                "source_sha256",
+                "source_duration_seconds",
+                "processed_interval",
+                "stage_fingerprint",
+                "aligned_fingerprint",
+                "parent_checksums",
+                "configuration",
+                "model",
+            )
+        )
+        and raw.get("plan_checksum") == plan["artifact_checksum"],
+        "invalid raw inference lineage",
+    )
+    return raw
+
+
+def canonical_turns(turns, plan):
+    """Copy raw values; only positive intersections may be clipped. Never drop turns."""
+    require(isinstance(turns, list), "invalid diarization turn payload")
+    lower, upper = plan["processed_interval"]
+    bounded, clipping = [], []
+    raw_outside = 0
+    for index, raw in enumerate(turns):
+        require(isinstance(raw, dict), "invalid diarization turn")
+        turn = copy.deepcopy(raw)
+        start, end = raw.get("start"), raw.get("end")
+        if number(start) and number(end) and start < end:
+            turn.setdefault("duration", end - start)
+            outside = start < lower or end > upper
+            raw_outside += int(outside)
+            a, b = max(lower, start), min(upper, end)
+            if outside and a < b:
+                turn.update(start=a, end=b, duration=b - a)
+                clipping.append(
+                    {
+                        "turn_index": index,
+                        "raw_start": start,
+                        "raw_end": end,
+                        "canonical_start": a,
+                        "canonical_end": b,
+                        "reason": "CLIPPED_TO_AUDIO_BOUNDS",
+                    }
+                )
+        bounded.append(turn)
+    return bounded, {
+        "RAW_OUT_OF_BOUNDS_TURN": raw_outside,
+        "CLIPPED_TO_AUDIO_BOUNDS": len(clipping),
+        "clipped_turns": clipping,
+    }
+
+
+def encode_raw(value):
+    """Losslessly encode nonfinite model floats in strict JSON, without rejecting output."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return {"__raw_nonfinite_float__": repr(value)}
+    if isinstance(value, list):
+        return [encode_raw(v) for v in value]
+    if isinstance(value, dict):
+        return {k: encode_raw(v) for k, v in value.items()}
+    return value
+
+
+def decode_raw(value):
+    if isinstance(value, dict):
+        if set(value) == {"__raw_nonfinite_float__"}:
+            return float(value["__raw_nonfinite_float__"])
+        return {k: decode_raw(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [decode_raw(v) for v in value]
+    return value
+
+
+def prepare_raw(plan_path, plan, payload, cp, inventory, wall_seconds):
+    # No turn validation or normalization is permitted before this atomic write.
+    regular = payload.get("turns") if isinstance(payload, dict) else payload
+    exclusive = payload.get("exclusive_turns") if isinstance(payload, dict) else None
+    raw = seal_artifact(
+        {
+            "schema_version": 1,
+            "artifact_type": "diarization_raw_inference",
+            "status": "INFERENCE_COMPLETED",
+            "inference_completed": True,
+            **{
+                k: copy.deepcopy(plan[k])
+                for k in (
+                    "session_id",
+                    "source_sha256",
+                    "source_duration_seconds",
+                    "processed_interval",
+                    "stage_fingerprint",
+                    "aligned_fingerprint",
+                    "parent_checksums",
+                    "configuration",
+                    "model",
+                )
+            },
+            "plan_checksum": plan["artifact_checksum"],
+            "turns": encode_raw(regular),
+            "exclusive_turns": encode_raw(exclusive),
+            "detected_speaker_labels": sorted(
+                {
+                    t["speaker"]
+                    for t in regular
+                    if isinstance(t, dict) and isinstance(t.get("speaker"), str)
+                }
+            )
+            if isinstance(regular, list)
+            else [],
+            "execution": {
+                "attempt": cp["attempt"],
+                "started_at": cp["started_at"],
+                "inference_completed_at": utc_timestamp(),
+                "wall_seconds": wall_seconds,
+                "model_inventory": inventory["files"],
+                "immutable_input_checksums": cp["immutable_input_checksums"],
+            },
+        }
+    )
+    require(not raw_path(plan_path).exists(), "immutable raw inference already exists")
+    atomic_write_json(raw_path(plan_path), raw)
+    return raw
+
+
+def raw_validation(raw, plan):
+    turns, anomalies = canonical_turns(decode_raw(raw["turns"]), plan)
+    exclusive, exclusive_qa, exclusive_anomalies = None, None, None
+    if raw["exclusive_turns"] is not None:
+        exclusive, exclusive_anomalies = canonical_turns(decode_raw(raw["exclusive_turns"]), plan)
+        exclusive_qa = evaluate_turns(exclusive, plan)
+    return (
+        turns,
+        evaluate_turns(turns, plan),
+        anomalies,
+        exclusive,
+        exclusive_qa,
+        exclusive_anomalies,
+    )
+
+
 def read_checkpoint(plan_path, plan):
     cp = read_artifact(checkpoint_path(plan_path))
     require(
@@ -459,14 +623,14 @@ def read_checkpoint(plan_path, plan):
         and cp.get("plan_checksum") == plan["artifact_checksum"]
         and cp.get("parent_checksums") == plan["parent_checksums"]
         and cp.get("stage_fingerprint") == plan["stage_fingerprint"]
-        and cp.get("status") in {"RUNNING", "INTERRUPTED", "FAILED", "SUCCEEDED"},
+        and cp.get("status") in {"RUNNING", "INTERRUPTED", "FAILED", *COMPLETE_STATES},
         "diarization checkpoint identity changed",
     )
-    if cp["status"] == "SUCCEEDED":
+    if cp["status"] in COMPLETE_STATES:
         result = validate_artifact(cp["result"])
         require(
             result.get("artifact_type") == "diarization"
-            and result.get("status") == "SUCCEEDED"
+            and result.get("status") == cp["status"]
             and result["session_id"] == plan["session_id"]
             and result["stage_fingerprint"] == plan["stage_fingerprint"]
             and result["aligned_fingerprint"] == plan["aligned_fingerprint"]
@@ -485,6 +649,22 @@ def read_checkpoint(plan_path, plan):
             and result["qa"]["validation_pass"],
             "invalid completed diarization result",
         )
+        if "raw_inference_checksum" in result:
+            raw = read_raw(plan_path, plan)
+            regular, qa, anomalies, exclusive, exclusive_qa, exclusive_anomalies = raw_validation(
+                raw, plan
+            )
+            require(
+                result["raw_inference_checksum"] == raw["artifact_checksum"]
+                and result["turns"] == regular
+                and result["qa"] == qa
+                and result["raw_anomalies"] == anomalies
+                and result["exclusive_turns"] == exclusive
+                and result["exclusive_qa"] == exclusive_qa
+                and result["exclusive_raw_anomalies"] == exclusive_anomalies
+                and (exclusive_qa is None or exclusive_qa["validation_pass"]),
+                "canonical result differs from immutable raw inference",
+            )
     return cp
 
 
@@ -519,7 +699,6 @@ def status_report(config, sid, *, smoke=False, aligned_fingerprint=None, fingerp
         )
         aligned_fingerprint = selected["aligned_fingerprint"]
     _, _, _, work, _, _ = load_input(config, sid, aligned_fingerprint)
-    model = inspect_model(config.application.root, model_spec(config), full=True)
     if fingerprint:
         require(bool(re.fullmatch(r"[0-9a-f]{64}", fingerprint)), "invalid diarization fingerprint")
         path = work / "diarization" / fingerprint / "plan.json"
@@ -538,7 +717,7 @@ def status_report(config, sid, *, smoke=False, aligned_fingerprint=None, fingerp
             state = cp["status"]
             if state == "RUNNING" and not worker_active(work):
                 state = "INTERRUPTED"
-            if state == "SUCCEEDED":
+            if state in COMPLETE_STATES:
                 result = cp["result"]
         except (OSError, ValueError, KeyError, TypeError):
             state = "INVALID_CHECKPOINT"
@@ -553,14 +732,38 @@ def status_report(config, sid, *, smoke=False, aligned_fingerprint=None, fingerp
         except ValueError:
             state = "INVALID_OUTPUT"
     qa = result["qa"] if result else (cp.get("qa") if cp else None)
+    raw, raw_error = None, None
+    if raw_path(path).exists():
+        try:
+            raw = read_raw(path, plan)
+        except (OSError, ValueError, KeyError, TypeError):
+            raw_error = "INVALID_RAW_INFERENCE"
+            state = raw_error
+    inventory = result.get("execution", {}).get("model_inventory") if result else None
+    model_status = "VERIFIED_AT_EXECUTION" if inventory else "UNKNOWN"
+    execution_state = (
+        state
+        if state in COMPLETE_STATES
+        else "RAW_PERSISTED_VALIDATION_FAILED"
+        if raw and state == "FAILED"
+        else "RAW_PERSISTED_PENDING_VALIDATION"
+        if raw
+        else "INFERENCE_COMPLETED_RAW_PERSISTENCE_FAILED"
+        if cp and cp.get("inference_completed") and not raw
+        else "INFERENCE_COMPLETED_RAW_NOT_PERSISTED"
+        if qa and not raw
+        else "INFERENCE_FAILED"
+        if state == "FAILED"
+        else state
+    )
     return {
         "session_id": sid,
-        "model_provisioned": model["status"] == "PROVISIONED",
-        "model_status": model["status"],
+        "model_provisioned": bool(inventory),
+        "model_status": model_status,
         "pinned_revision": MODEL["diarization"]["revision"],
-        "verified_revision": model["revision"] if model["status"] == "PROVISIONED" else None,
-        "model_verification": model["verification"],
-        "model_missing_required": model["missing_required"],
+        "verified_revision": MODEL["diarization"]["revision"] if inventory else None,
+        "model_verification": "RECORDED_AT_EXECUTION" if inventory else "NOT_CHECKED",
+        "model_missing_required": None,
         "aligned_fingerprint": plan["aligned_fingerprint"],
         "aligned_checksum": plan["parent_checksums"]["aligned_asr"],
         "fingerprint": plan["stage_fingerprint"],
@@ -573,14 +776,52 @@ def status_report(config, sid, *, smoke=False, aligned_fingerprint=None, fingerp
         "plan_path": str(path) if path.exists() else None,
         "output_path": str(out) if published else None,
         "expected_output_path": str(out),
-        "processing_complete": state == "SUCCEEDED",
+        "processing_complete": state in COMPLETE_STATES,
         "full_diarization_complete": published
-        and state == "SUCCEEDED"
+        and state in COMPLETE_STATES
         and plan["configuration"]["mode"] == "FULL",
         "detected_speaker_labels": qa["detected_speaker_labels"] if qa else [],
         "turn_count": qa["turn_count"] if qa else 0,
         "duration_coverage": qa["duration_coverage_fraction"] if qa else None,
         "qa": qa,
+        "execution_state": execution_state,
+        "inference_completed": raw is not None
+        or result is not None
+        or bool(cp and (cp.get("inference_completed") or qa)),
+        "raw_inference_persisted": raw is not None,
+        "raw_inference_path": str(raw_path(path)) if raw is not None else None,
+        "raw_inference_error": raw_error,
+        "raw_turn_count": len(raw["turns"]) if raw and isinstance(raw["turns"], list) else None,
+        "regular_turn_count": len(result["turns"])
+        if result
+        else len(raw["turns"])
+        if raw and isinstance(raw["turns"], list)
+        else None,
+        "exclusive_turn_count": len(raw["exclusive_turns"])
+        if raw and isinstance(raw["exclusive_turns"], list)
+        else None,
+        "validation_state": "PASSED"
+        if result
+        else "FAILED"
+        if qa or (cp and cp.get("failure_phase") == "OUTPUT_VALIDATION")
+        else "NOT_RUN",
+        "clipping_count": result["raw_anomalies"]["CLIPPED_TO_AUDIO_BOUNDS"]
+        if result and "raw_anomalies" in result
+        else cp.get("raw_anomalies", {}).get("CLIPPED_TO_AUDIO_BOUNDS")
+        if cp
+        else None,
+        "raw_anomalies": result.get("raw_anomalies")
+        if result
+        else cp.get("raw_anomalies")
+        if cp
+        else None,
+        "exclusive_qa": result.get("exclusive_qa")
+        if result
+        else cp.get("exclusive_qa")
+        if cp
+        else None,
+        "structural_errors": qa["error_counts"] if qa else None,
+        "attribution_warnings": qa["warning_counts"] if qa else None,
         "failure_code": cp.get("failure_code") if cp else None,
         "failure_phase": cp.get("failure_phase") if cp else None,
         "models_loaded": False,
@@ -614,7 +855,7 @@ def run_diarization(
     ):
         cp_path = checkpoint_path(plan_path)
         old = read_checkpoint(plan_path, plan) if cp_path.exists() else None
-        if old and old["status"] == "SUCCEEDED":
+        if old and old["status"] in COMPLETE_STATES:
             publish(config, sid, plan, old["result"])
             return status_report(
                 config,
@@ -652,31 +893,54 @@ def run_diarization(
         phase = "MODEL_VERIFICATION"
         try:
             read_plan(config, sid, plan_path)
-            # Hash-verify every required pinned file before factory/inference/decoding.
-            local_path = local_model_path(config.application.root, "diarization")
-            require(
-                local_path.name == MODEL["diarization"]["revision"],
-                "wrong local diarization revision",
-            )
-            require(
-                not clip.is_symlink()
-                and clip.resolve().is_relative_to(plan_path.parent.resolve())
-                and clip.resolve() != source.resolve(),
-                "unsafe derived diarization clip",
-            )
-            inventory = inspect_model(config.application.root, model_spec(config), full=True)
-            require(
-                inventory["status"] == "PROVISIONED", "pinned local diarization model unavailable"
-            )
-            phase = "AUDIO_DECODING"
-            extractor(source, clip, plan["processed_interval"])
-            phase = "MODEL_LOADING"
-            engine = engine_factory(local_path)
-            phase = "INFERENCE"
-            turns = engine(clip)
+            new_inference = False
+            if raw_path(plan_path).exists():
+                raw = read_raw(plan_path, plan)
+            else:
+                # Hash-verify every required pinned file before factory/inference/decoding.
+                local_path = local_model_path(config.application.root, "diarization")
+                require(
+                    local_path.name == MODEL["diarization"]["revision"],
+                    "wrong local diarization revision",
+                )
+                require(
+                    not clip.is_symlink()
+                    and clip.resolve().is_relative_to(plan_path.parent.resolve())
+                    and clip.resolve() != source.resolve(),
+                    "unsafe derived diarization clip",
+                )
+                inventory = inspect_model(config.application.root, model_spec(config), full=True)
+                require(
+                    inventory["status"] == "PROVISIONED",
+                    "pinned local diarization model unavailable",
+                )
+                phase = "AUDIO_DECODING"
+                extractor(source, clip, plan["processed_interval"])
+                phase = "MODEL_LOADING"
+                engine = engine_factory(local_path)
+                phase = "INFERENCE"
+                payload = engine(clip)
+                cp["inference_completed"] = True
+                phase = "RAW_PERSISTENCE"
+                raw = prepare_raw(
+                    plan_path, plan, payload, cp, inventory, time.perf_counter() - started
+                )
+                new_inference = True
             phase = "OUTPUT_VALIDATION"
-            qa = evaluate_turns(turns, plan)
-            cp["qa"] = qa
+            turns, qa, anomalies, exclusive, exclusive_qa, exclusive_anomalies = raw_validation(
+                raw, plan
+            )
+            cp.update(
+                qa=qa,
+                raw_inference_checksum=raw["artifact_checksum"],
+                exclusive_qa=exclusive_qa,
+                exclusive_raw_anomalies=exclusive_anomalies,
+                raw_anomalies=anomalies,
+            )
+            require(
+                exclusive_qa is None or exclusive_qa["validation_pass"],
+                "exclusive diarization turn contract failed",
+            )
             require(qa["validation_pass"], "diarization turn contract failed")
             require(
                 all(
@@ -686,19 +950,37 @@ def run_diarization(
                 "immutable diarization input changed",
             )
             read_plan(config, sid, plan_path)
-            final_inventory = inspect_model(config.application.root, model_spec(config), full=True)
             require(
-                final_inventory["status"] == "PROVISIONED"
-                and final_inventory["files"] == inventory["files"],
-                "diarization model changed during execution",
+                raw["execution"]["immutable_input_checksums"] == cp["immutable_input_checksums"],
+                "raw inference immutable inputs changed",
+            )
+            if new_inference:
+                current_inventory = inspect_model(
+                    config.application.root, model_spec(config), full=True
+                )
+                require(
+                    current_inventory["status"] == "PROVISIONED"
+                    and current_inventory["files"] == inventory["files"],
+                    "diarization model changed during execution",
+                )
+            final_inventory = {"files": raw["execution"]["model_inventory"]}
+            completed_status = (
+                "SUCCEEDED_WITH_WARNINGS"
+                if (
+                    qa["has_warnings"]
+                    or anomalies["CLIPPED_TO_AUDIO_BOUNDS"]
+                    or (exclusive_qa and exclusive_qa["has_warnings"])
+                    or (exclusive_anomalies and exclusive_anomalies["CLIPPED_TO_AUDIO_BOUNDS"])
+                )
+                else "SUCCEEDED"
             )
             seconds = plan["processed_interval"][1] - plan["processed_interval"][0]
-            wall_seconds = time.perf_counter() - started
+            wall_seconds = raw["execution"]["wall_seconds"]
             result = seal_artifact(
                 {
                     "schema_version": 1,
                     "artifact_type": "diarization",
-                    "status": "SUCCEEDED",
+                    "status": completed_status,
                     "session_id": sid,
                     "source_sha256": plan["source_sha256"],
                     "source_duration_seconds": plan["source_duration_seconds"],
@@ -709,15 +991,15 @@ def run_diarization(
                     "plan_checksum": plan["artifact_checksum"],
                     "configuration": plan["configuration"],
                     "model": MODEL,
-                    "turns": [
-                        {
-                            "start": t["start"],
-                            "end": t["end"],
-                            "speaker": t["speaker"],
-                            "duration": t["end"] - t["start"],
-                        }
-                        for t in turns
-                    ],
+                    "turns": turns,
+                    "exclusive_turns": exclusive,
+                    "exclusive_qa": exclusive_qa,
+                    "raw_anomalies": anomalies,
+                    "exclusive_raw_anomalies": exclusive_anomalies,
+                    "raw_inference_checksum": raw["artifact_checksum"],
+                    "attribution_readiness_has_warnings": qa["has_warnings"],
+                    "attribution_note": "Uncovered reviewed bounds are attribution warnings; "
+                    "no reviewed segments are removed or assigned guessed speakers.",
                     "aligned_segment_references": copy.deepcopy(plan["aligned_segment_references"]),
                     "qa": qa,
                     "speaker_identities_assigned": False,
@@ -725,9 +1007,10 @@ def run_diarization(
                     "full_diarization_complete": not smoke,
                     "mode_processing_complete": True,
                     "execution": {
-                        "attempt": cp["attempt"],
-                        "started_at": cp["started_at"],
+                        "attempt": raw["execution"]["attempt"],
+                        "started_at": raw["execution"]["started_at"],
                         "finished_at": utc_timestamp(),
+                        "inference_completed_at": raw["execution"]["inference_completed_at"],
                         "wall_seconds": wall_seconds,
                         "source_audio_seconds": plan["source_duration_seconds"],
                         "processed_audio_seconds": seconds,
@@ -743,7 +1026,7 @@ def run_diarization(
                     },
                 }
             )
-            cp.update(status="SUCCEEDED", result=result)
+            cp.update(status=completed_status, result=result)
         except (KeyboardInterrupt, SystemExit):
             cp.update(status="INTERRUPTED", failure_code="PROCESS_INTERRUPTED")
             raise
@@ -763,7 +1046,7 @@ def run_diarization(
             finally:
                 del engine
                 gc.collect()
-        if cp["status"] == "SUCCEEDED":
+        if cp["status"] in COMPLETE_STATES:
             publish(config, sid, plan, cp["result"])
     return status_report(
         config,
