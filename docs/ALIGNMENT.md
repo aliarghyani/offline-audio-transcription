@@ -196,7 +196,8 @@ Existing old successful checkpoints with missing word timings are reported as
 
 `--finalize` consumes only existing checkpoints under the session worker lock,
 validates reviewed/source/plan lineage and complete coverage, archives/reclassifies
-eligible legacy content failures, and publishes `transcript.aligned.fa.json` plus
+eligible legacy content failures, and publishes `transcript.aligned.fa.json` and
+`transcript.aligned.fa.txt` plus
 updated progress. It denies network access and never decodes audio, loads a model,
 uses ASR/diarization/LLMs, or retries a failed unit. Repeating it is idempotent for
 the canonical artifact. A real failed unit still blocks canonical publication.
@@ -223,3 +224,32 @@ remain 2. `uv lock --check --offline`, full pytest (166 passed), and
 `python -m ruff check .` passed. Detailed private verification evidence is in
 `work/<session>/alignment/<fingerprint>/partial-finalization-verification.json`;
 transcripts and checkpoints remain ignored local data.
+
+Phase 5.1 applies the same recovery contract to every session and QUALITY. A
+completed full plan with SUCCEEDED/PARTIAL units and validated complete segment
+coverage publishes as SUCCEEDED_WITH_WARNINGS when QA has warnings. Legacy
+SUCCEEDED canonical JSON with identical content and explicit QA warnings remains
+valid and is reused byte-for-byte. QUALITY first tries checkpoint-only finalization;
+no model is needed when persisted results are safely complete. Its receipt and
+console expose failed/partial segment counts, unaligned words, suspicious word
+durations, and partial/failed unit counts.
+
+Structurally valid reviewed zero-duration segments cannot provide an alignment
+interval. Execution now isolates them before calling the engine, retains reviewed
+text/timing, and emits ZERO_DURATION_REVIEWED_SEGMENT with null word timestamps.
+Remaining segments still execute, and only a completely returned/validated unit
+can finish PARTIAL. Negative durations and genuine engine errors remain failures.
+Failure diagnostics distinguish ENGINE_EXECUTION_FAILED from lexical mismatch.
+Never promote an aborted checkpoint merely because its fallback words are null.
+
+Ravaq-04 inspection found Unit 3's isolated lexical failure safely PARTIAL. Unit 6
+instead has ReviewError, zero processed audio, no completion marker, and nine
+unit-exception fallback segments (reviewed indices 359-367). Index 366 has a valid
+reviewed zero-duration interval at 1610.08 seconds, which the former adapter
+assertion rejects. The historical checkpoint omits the exception message and
+discarded per-segment engine results; the exact sanitized-code-only exception
+origin cannot exclude the adapter's PCM validation guards. The checkpoint does
+not prove completed inference and is not recoverable from persisted data.
+No production inference or canonical publication was performed for Ravaq-04.
+Private inspection with exact segment IDs/text/timing and immutable input hashes:
+`work/s-1c781318ac9e4a083210/alignment/56f75e93fa5a1ba4af9c492cc4785fa625e03aee6a471b367e85f5fb6e64bcce/phase-5.1-inspection.json`.

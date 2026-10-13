@@ -109,7 +109,7 @@ def load_parents(config, sid, aligned_fingerprint=None, diarization_fingerprint=
     aligned = read_artifact(apath)
     require(
         aligned["artifact_type"] == "aligned_asr"
-        and aligned["status"] == "SUCCEEDED"
+        and aligned["status"] in {"SUCCEEDED", "SUCCEEDED_WITH_WARNINGS"}
         and aligned["configuration"]["mode"] == "FULL"
         and aligned["qa"]["full_alignment_complete"] is True
         and aligned["qa"]["coverage_validation_pass"] is True,

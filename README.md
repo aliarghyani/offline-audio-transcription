@@ -96,14 +96,25 @@ in A with warnings; targeted retries never escalate to a full ASR rerun.
 it requires resolved decisions before structural acceptance/alignment. With no retry
 targets, all policies retain raw text without claiming human verification.
 Alignment lexical failures remain PARTIAL with warnings and preserved words.
+Safely complete partial alignment finishes QUALITY as SUCCEEDED_WITH_WARNINGS,
+with full segment coverage, null unavailable word timings, and visible warning counts.
+Checkpoint-only finalization publishes both aligned JSON and TXT without a model.
 `--speakers 2` is the only supported count for the current product.
 
 ```powershell
 uv run --offline --no-sync session-pipeline status .\sessions\session5.m4a
 uv run --offline --no-sync session-pipeline status <session-id> --json
 uv run --offline --no-sync session-pipeline transcribe .\sessions --profile full
+uv run --offline --no-sync session-pipeline transcribe .\sessions\ravaq --profile quality --continue-on-error
 uv run --offline --no-sync session-pipeline transcribe .\sessions\session5.m4a --profile full --dry-run
 ```
+
+Directory batches default to stop on the first failure or gate. `--continue-on-error`
+continues after FAILED sessions, while review/model gates and interruption still stop.
+The final summary reports succeeded, succeeded with warnings, failed, waiting/blocking,
+and skipped/reused sessions, plus unprocessed files. Reuse counts overlap completion
+counts. Failed filenames/session IDs stay visible in text and JSON output; any failure
+keeps a nonzero exit status even when later files succeed.
 
 Status verifies saved files without loading models or contacting the network, and
 recognizes an existing pre-productization final lineage read-only. Multiple historical

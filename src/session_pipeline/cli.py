@@ -67,6 +67,11 @@ def _parser() -> argparse.ArgumentParser:
     transcribe.add_argument("--speakers", type=int, choices=(2,), default=2)
     transcribe.add_argument("--dry-run", action="store_true", help="plan only; no models or writes")
     transcribe.add_argument("--json", action="store_true")
+    transcribe.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="continue after failed sessions; still stop on review/model gates or interruption",
+    )
     status = commands.add_parser("status", help="read-only pipeline view; no models/network")
     status.add_argument("input")
     status.add_argument("--json", action="store_true")
@@ -248,13 +253,21 @@ def run(argv: list[str] | None = None) -> int:
                     profile=args.profile,
                     policy=args.review_policy,
                     dry_run=args.dry_run,
+                    continue_on_error=args.continue_on_error,
                     progress=None if args.json else lambda stage: print(f"{stage}...", flush=True),
                 )
                 if args.json:
                     _emit(report, json_mode=True)
                 else:
                     for session in report["sessions"]:
+                        print(f"Source: {session['source_path']}")
                         print(workflow.human_summary(session))
+                    print(
+                        "Batch summary: "
+                        + ", ".join(f"{key}={value}" for key, value in report["summary"].items())
+                    )
+                    for failure in report["failures"]:
+                        print(f"Failed: {failure['source_path']} ({failure['session_id']})")
                     if report["unprocessed"]:
                         print(f"Batch stopped; {len(report['unprocessed'])} session(s) pending.")
             state = report["state"]

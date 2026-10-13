@@ -379,31 +379,32 @@ class LocalStages:
         }
 
     def alignment(self, results):
-        from session_pipeline.alignment import run_alignment
+        from session_pipeline.alignment import finalize_alignment, run_alignment
 
-        report = run_alignment(
+        report = finalize_alignment(
             self.config, self.sid, reviewed_fingerprint=results["REVIEW"]["reviewed_fingerprint"]
         )
+        if not report.get("full_alignment_complete"):
+            report = run_alignment(
+                self.config,
+                self.sid,
+                reviewed_fingerprint=results["REVIEW"]["reviewed_fingerprint"],
+            )
         if not report["full_alignment_complete"] or not report.get("aligned_json"):
             return {
                 "state": "FAILED",
                 "warnings": ["alignment incomplete; completed units retained"],
+                "warning_counts": alignment_warning_counts(report),
             }
         path = Path(report["aligned_json"])
-        txt = path.with_suffix(".txt")
-        # Readable QUALITY export, without modifying aligned JSON/text ownership.
-        document = read_artifact(path)
-        text = "\n".join(s["text"] for s in document["segments"]) + "\n"
-        if txt.exists() and txt.read_text("utf-8") != text:
-            raise ValueError("quality TXT changed")
-        if not txt.exists():
-            write_text_atomic(txt, text)
+        txt = Path(report["aligned_txt"])
         warning = report["alignment_has_warnings"]
         return {
             "state": "SUCCEEDED_WITH_WARNINGS" if warning else "SUCCEEDED",
             "aligned_fingerprint": path.parent.name,
             "json_path": str(path),
             "txt_path": str(txt),
+            "warning_counts": alignment_warning_counts(report),
             "warnings": ["alignment contains partial/unaligned words; original text preserved"]
             if warning
             else [],
@@ -733,6 +734,8 @@ def transcribe_one(
                 entry["runtime_seconds"] = time.perf_counter() - started
             report["stages"][stage] = entry
             results[stage] = result
+            if stage == "ALIGNMENT":
+                report["warning_counts"] = result.get("warning_counts", {})
             parent_bindings[stage] = entry.get("bindings", [])
             report["warnings"].extend(result.get("warnings", []))
             if stage == "INTEGRITY":
@@ -750,7 +753,10 @@ def transcribe_one(
                 return report
         last = results[PROFILES[profile][-1]]
         report.update(
-            state="SUCCEEDED_WITH_WARNINGS" if report["warnings"] else "SUCCEEDED",
+            state="SUCCEEDED_WITH_WARNINGS"
+            if report["warnings"]
+            or any(r["state"] == "SUCCEEDED_WITH_WARNINGS" for r in results.values())
+            else "SUCCEEDED",
             json_path=last.get("json_path"),
             txt_path=last.get("txt_path"),
         )
@@ -758,24 +764,84 @@ def transcribe_one(
         return report
 
 
-def transcribe(config, value, **options):
+def alignment_warning_counts(report):
+    return {
+        "unaligned_words": report["unaligned_word_count"],
+        "failed_segments": report["segment_status_counts"]["ALIGNMENT_FAILED"],
+        "partial_segments": report["segment_status_counts"]["PARTIAL_ALIGNMENT"],
+        "suspicious_word_durations": report["word_qa_counts"]["SUSPICIOUS_WORD_DURATION"],
+        "partial_units": report["partial_units"],
+        "failed_units": report["failed_units"],
+    }
+
+
+def transcribe(config, value, *, continue_on_error=False, **options):
     paths = audio_inputs(Path(value))
     if not paths:
         raise ValueError("no supported audio files found")
     reports = []
     for path in paths:
-        report = transcribe_one(config, path, **options)
+        try:
+            report = transcribe_one(config, path, **options)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            try:
+                sid = build_session_source(path).session_id
+            except OSError:
+                sid = None
+            report = {
+                "state": "FAILED",
+                "session_id": sid,
+                "profile": options.get("profile", DEFAULT_PROFILE),
+                "stages": {},
+                "warnings": [],
+                "error_type": type(error).__name__,
+                "error": str(error),
+            }
+        report["source_path"] = str(path)
         reports.append(report)
         if report["state"] not in COMPLETE and not report.get("dry_run"):
-            break  # Stop on any gate/failure; pending sessions are explicitly reported.
+            if continue_on_error and report["state"] == "FAILED":
+                continue
+            break  # Gates and interruptions still stop; failures require explicit opt-in.
+    failures = [
+        {k: r.get(k) for k in ("source_path", "session_id", "stopped_at", "error_type", "error")}
+        for r in reports
+        if r["state"] == "FAILED"
+    ]
+    summary = {
+        "succeeded": sum(r["state"] == "SUCCEEDED" for r in reports),
+        "succeeded_with_warnings": sum(r["state"] == "SUCCEEDED_WITH_WARNINGS" for r in reports),
+        "failed": len(failures),
+        "waiting_blocking": sum(r["state"] not in COMPLETE | {"FAILED"} for r in reports),
+        # Reuse is supplementary to the completion counts above.
+        "skipped_reused": sum(
+            r["state"] == "SKIPPED"
+            or r["state"] in COMPLETE
+            and all(
+                e.get("reused")
+                for s, e in r["stages"].items()
+                if s != "INGEST" and e["state"] != "SKIPPED"
+            )
+            for r in reports
+        ),
+        "unprocessed": len(paths) - len(reports),
+    }
     return {
-        "state": reports[-1]["state"]
+        "state": "INTERRUPTED"
+        if reports[-1]["state"] == "INTERRUPTED"
+        else "FAILED"
+        if failures
+        else reports[-1]["state"]
         if reports[-1]["state"] not in COMPLETE
         else "SUCCEEDED_WITH_WARNINGS"
         if any(r["state"] == "SUCCEEDED_WITH_WARNINGS" for r in reports)
         else "SUCCEEDED",
         "sessions": reports,
-        "batch_policy": "SEQUENTIAL_STOP_ON_GATE_OR_FAILURE",
+        "batch_policy": "SEQUENTIAL_CONTINUE_ON_ERROR_STOP_ON_GATE"
+        if continue_on_error
+        else "SEQUENTIAL_STOP_ON_GATE_OR_FAILURE",
+        "summary": summary,
+        "failures": failures,
         "discovered_count": len(paths),
         "unprocessed": [str(p) for p in paths[len(reports) :]],
     }
@@ -921,6 +987,11 @@ def human_summary(report):
         suffix += "  HUMAN_CONFIRMED" if entry.get("mapping_status") == "HUMAN_CONFIRMED" else ""
         lines.append(f"{stage:18} {entry['state']}{suffix}")
     lines.extend(f"Warning: {w}" for w in report.get("warnings", []))
+    if report.get("warning_counts"):
+        lines.append(
+            "Alignment warnings: "
+            + ", ".join(f"{key}={value}" for key, value in report["warning_counts"].items())
+        )
     for key, label in [
         ("json_path", "JSON"),
         ("txt_path", "TXT"),

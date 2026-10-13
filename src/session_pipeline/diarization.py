@@ -137,7 +137,7 @@ def load_input(config, sid, aligned_fingerprint=None):
     aligned = read_artifact(path)
     require(
         aligned.get("artifact_type") == "aligned_asr"
-        and aligned.get("status") == "SUCCEEDED"
+        and aligned.get("status") in {"SUCCEEDED", "SUCCEEDED_WITH_WARNINGS"}
         and aligned["session_id"] == sid
         and aligned["stage_fingerprint"] == path.parent.name
         and aligned["configuration"]["mode"] == "FULL"

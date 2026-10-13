@@ -66,7 +66,12 @@ QA_CODES = (
     "SUSPICIOUS_WORD_DURATION",
 )
 TERMINAL_COMPLETE = {"SUCCEEDED", "PARTIAL"}
-CONTENT_FAILURE_CODES = {None, "NO_ALIGNMENT_PATH", "NO_ALIGNABLE_CHARACTERS"}
+CONTENT_FAILURE_CODES = {
+    None,
+    "NO_ALIGNMENT_PATH",
+    "NO_ALIGNABLE_CHARACTERS",
+    "ZERO_DURATION_REVIEWED_SEGMENT",
+}
 
 
 def digest(value):
@@ -383,7 +388,12 @@ def normalize_segment(original, returned, unit, segment_index, segment_id, durat
         "alignment_diagnostics": {
             "lexical_mapping_failed": mismatch,
             "engine_failure_code": returned.get("failure_code"),
-            "failure_reason": ("LEXICAL_MAPPING_FAILED" if mismatch else "NO_ALIGNED_WORDS")
+            "failure_reason": (
+                "ENGINE_EXECUTION_FAILED"
+                if returned.get("failure_code") not in CONTENT_FAILURE_CODES
+                else returned.get("failure_code")
+                or ("LEXICAL_MAPPING_FAILED" if mismatch else "NO_ALIGNED_WORDS")
+            )
             if status == "ALIGNMENT_FAILED"
             else None,
         },
@@ -509,6 +519,7 @@ def checkpoint_state(cp, plan, unit, reviewed):
             validate_segments(cp["segments"], reviewed, unit, plan["duration_seconds"])
             if (
                 cp.get("finished_at")
+                and cp.get("execution_completed") is not False
                 and cp.get("processed_audio_seconds", 0)
                 >= unit["decoded_interval"][1] - unit["decoded_interval"][0]
                 and any(s["status"] == "ALIGNMENT_FAILED" for s in cp["segments"])
@@ -821,7 +832,16 @@ class LocalAligner:
                     "end": original["end"] - unit["decoded_interval"][0],
                     "text": original["text"],
                 }
-                require(local["end"] > local["start"], "zero-duration alignment segment")
+                require(local["end"] >= local["start"], "negative-duration alignment segment")
+                if local["end"] == local["start"]:
+                    result.append(
+                        {
+                            "words": [],
+                            "failed": True,
+                            "failure_code": "ZERO_DURATION_REVIEWED_SEGMENT",
+                        }
+                    )
+                    continue
                 # Exceptions propagate to the unit's sanitized execution failure.
                 aligned = self.wx.align(
                     [local],
@@ -896,15 +916,28 @@ def run_alignment(
                         "unsafe derived alignment clip destination",
                     )
                     if unit["segment_indices"]:
-                        if engine is None:
-                            engine = engine_factory(config.application.root)
-                        extractor(source, clip, unit["decoded_interval"])
                         originals = [reviewed["segments"][n] for n in unit["segment_indices"]]
-                        returned = engine(originals, unit, clip)
+                        alignable = [s for s in originals if s["end"] > s["start"]]
+                        if alignable and engine is None:
+                            engine = engine_factory(config.application.root)
+                        if alignable:
+                            extractor(source, clip, unit["decoded_interval"])
+                        returned = engine(alignable, unit, clip) if alignable else []
                         require(
-                            isinstance(returned, list) and len(returned) == len(originals),
+                            isinstance(returned, list) and len(returned) == len(alignable),
                             "alignment engine lost reviewed segments",
                         )
+                        inferred = iter(returned)
+                        returned = [
+                            next(inferred)
+                            if s["end"] > s["start"]
+                            else {
+                                "words": [],
+                                "failed": True,
+                                "failure_code": "ZERO_DURATION_REVIEWED_SEGMENT",
+                            }
+                            for s in originals
+                        ]
                         checkpoint["segments"] = [
                             normalize_segment(s, r, unit, n, segment_id, plan["duration_seconds"])
                             for s, r, n, segment_id in zip(
@@ -1035,7 +1068,9 @@ def publish_alignment(path, reviewed, plan_path, plan, report):
             {
                 "schema_version": 1,
                 "artifact_type": "aligned_asr",
-                "status": "SUCCEEDED",
+                "status": "SUCCEEDED_WITH_WARNINGS"
+                if report["alignment_has_warnings"]
+                else "SUCCEEDED",
                 "session_id": plan["session_id"],
                 "source_sha256": plan["source_sha256"],
                 "model": MODEL,
@@ -1075,12 +1110,33 @@ def publish_alignment(path, reviewed, plan_path, plan, report):
             }
         )
         if aligned_path.exists():
-            require(read_artifact(aligned_path) == document, "existing aligned lineage changed")
+            existing = read_artifact(aligned_path)
+            # Legacy canonical artifacts used SUCCEEDED even with explicit QA warnings.
+            legacy = copy.deepcopy(document)
+            legacy["status"] = "SUCCEEDED"
+            require(
+                existing in (document, seal_artifact(legacy)), "existing aligned lineage changed"
+            )
         else:
             atomic_write_json(aligned_path, document)
         report["aligned_json"] = str(aligned_path)
+        from session_pipeline.review_merge import write_text_atomic
+
+        txt = aligned_path.with_suffix(".txt")
+        text = "\n".join(s["text"] for s in segments) + "\n"
+        if txt.exists():
+            require(txt.read_bytes() == text.encode("utf-8"), "existing aligned TXT changed")
+        else:
+            write_text_atomic(txt, text)
+        report["aligned_txt"] = str(txt)
     else:
         report["aligned_json"] = None
+        report["aligned_txt"] = None
+    report["status"] = (
+        ("SUCCEEDED_WITH_WARNINGS" if report["alignment_has_warnings"] else "SUCCEEDED")
+        if report["mode_processing_complete"]
+        else "FAILED"
+    )
     return report
 
 
@@ -1098,7 +1154,7 @@ def finalize_alignment(config, sid, *, plan_path=None, smoke=False, reviewed_fin
             reviewed_fingerprint=reviewed_fingerprint,
         )
         if not report.get("mode_processing_complete"):
-            return {**report, "aligned_json": None}
+            return {**report, "status": "FAILED", "aligned_json": None, "aligned_txt": None}
         plan_path = Path(report["plan_path"])
         plan = read_artifact(plan_path)
         path, reviewed, source, _, integrity = load_input(config, sid, path_fingerprint(plan))

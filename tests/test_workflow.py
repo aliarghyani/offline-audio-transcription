@@ -517,3 +517,103 @@ def test_review_policy_nonempty_target_lineage_and_human_gate(project_config, mo
     reviewed = read_artifact(Path(automatic["json_path"]))
     assert reviewed["provenance"]["review_mode"] == "AUTO_PREFER_B"
     assert not automatic["human_verified"]
+
+
+def test_quality_warning_state_and_counts_resume_without_asr_retry(product, synthetic, monkeypatch):
+    config, source = product
+    original = synthetic.run
+
+    def partial(self, stage, results):
+        result = original(self, stage, results)
+        if stage == "ALIGNMENT":
+            result.update(
+                state="SUCCEEDED_WITH_WARNINGS", warnings=[], warning_counts={"unaligned_words": 8}
+            )
+        return result
+
+    monkeypatch.setattr(synthetic, "run", partial)
+    done = workflow.transcribe_one(config, source, profile="quality", adapter_factory=synthetic)
+    assert done["state"] == "SUCCEEDED_WITH_WARNINGS"
+    assert done["warning_counts"] == {"unaligned_words": 8}
+    resumed = workflow.transcribe_one(config, source, profile="quality", adapter_factory=synthetic)
+    assert resumed["state"] == "SUCCEEDED_WITH_WARNINGS"
+    for stage in ("ASR", "ASR_RETRY", "ALIGNMENT"):
+        assert resumed["stages"][stage]["reused"]
+        assert [s for _, s in synthetic.calls].count(stage) == 1
+
+
+@pytest.mark.parametrize("keep_going", [False, True])
+def test_batch_failure_policy_retains_filename_id_and_nonzero_state(
+    product, synthetic, monkeypatch, keep_going
+):
+    config, source = product
+    second = source.with_name("z.wav")
+    wav(second, 101)
+    original = workflow.transcribe_one
+
+    def selective(config, path, **options):
+        synthetic.fail = "ASR" if path == source else None
+        return original(config, path, **options)
+
+    monkeypatch.setattr(workflow, "transcribe_one", selective)
+    report = workflow.transcribe(
+        config,
+        source.parent,
+        profile="fast",
+        adapter_factory=synthetic,
+        continue_on_error=keep_going,
+    )
+    assert report["state"] == "FAILED"
+    assert len(report["sessions"]) == (2 if keep_going else 1)
+    assert report["summary"]["failed"] == 1
+    assert report["summary"]["succeeded"] == int(keep_going)
+    assert report["failures"][0]["source_path"] == str(source)
+    assert report["failures"][0]["session_id"] == build_session_source(source).session_id
+    assert report["unprocessed"] == ([] if keep_going else [str(second)])
+
+
+def test_continue_on_error_stops_on_gate_and_counts_reused(product, synthetic):
+    config, source = product
+    second = source.with_name("z.wav")
+    wav(second, 101)
+    gate = workflow.transcribe(
+        config, source.parent, adapter_factory=synthetic, continue_on_error=True
+    )
+    assert gate["state"] == "WAITING_FOR_USER"
+    assert gate["summary"]["waiting_blocking"] == 1 and gate["unprocessed"] == [str(second)]
+    workflow.transcribe(config, source.parent, profile="fast", adapter_factory=synthetic)
+    reused = workflow.transcribe(config, source.parent, profile="fast", adapter_factory=synthetic)
+    assert reused["summary"]["skipped_reused"] == 2
+    assert reused["summary"]["succeeded"] == 2
+
+
+def test_continue_handles_pre_stage_errors_and_cli_failure_summary(
+    product, synthetic, monkeypatch, capsys
+):
+    config, source = product
+    second = source.with_name("z.wav")
+    wav(second, 101)
+    original = workflow.transcribe_one
+
+    def selective(config, path, **options):
+        if path == source:
+            raise ValueError("invalid persisted workflow")
+        return original(config, path, adapter_factory=synthetic, **options)
+
+    monkeypatch.setattr(workflow, "transcribe_one", selective)
+    monkeypatch.setattr(cli, "load_config", lambda **kwargs: config)
+    assert (
+        cli.run(
+            ["transcribe", str(source.parent), "--profile", "fast", "--continue-on-error", "--json"]
+        )
+        != 0
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["summary"]["succeeded"] == report["summary"]["failed"] == 1
+    assert report["failures"][0]["session_id"] == build_session_source(source).session_id
+    assert (
+        cli.run(["transcribe", str(source.parent), "--profile", "fast", "--continue-on-error"]) != 0
+    )
+    output = capsys.readouterr().out
+    assert "Batch summary:" in output and str(source) in output
+    assert build_session_source(source).session_id in output

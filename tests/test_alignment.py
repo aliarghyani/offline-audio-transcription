@@ -691,3 +691,156 @@ def test_adapter_execution_exception_propagates_as_failed_unit(tmp_path):
     engine.wx, engine.model, engine.metadata = module, object(), {}
     with pytest.raises(MemoryError):
         engine([seg(0, 2, "one two")], {"decoded_interval": [0, 2]}, clip)
+
+
+def test_multiple_lexical_failures_in_one_unit_publish_json_and_txt(reviewed, project_config):
+    sid, path, _ = reviewed
+
+    def several(originals, unit, clip):
+        result = fake_engine(originals, unit, clip)
+        if unit["index"] == 0:
+            result[0] = {"words": []}
+            result[1] = {"words": [{"word": "unrelated"}]}
+        return result
+
+    report = a.run_alignment(
+        project_config, sid, engine_factory=lambda _: several, extractor=fake_extract
+    )
+    assert report["status"] == "SUCCEEDED_WITH_WARNINGS"
+    assert report["partial_units"] == 1 and report["failed_units"] == 0
+    assert report["coverage_validation_pass"] and report["full_alignment_complete"]
+    assert report["unaligned_word_count"] == 4
+    doc = read_artifact(Path(report["aligned_json"]))
+    assert doc["status"] == "SUCCEEDED_WITH_WARNINGS"
+    originals = read_artifact(path)["segments"]
+    assert [s["text"] for s in doc["segments"]] == [s["text"] for s in originals]
+    assert Path(report["aligned_txt"]).read_bytes() == (
+        "\n".join(s["text"] for s in originals) + "\n"
+    ).encode("utf-8")
+    for s in doc["segments"][:2]:
+        assert s["status"] == "ALIGNMENT_FAILED"
+        assert all(w["start"] is None and w["end"] is None for w in s["words"])
+
+
+def test_zero_duration_is_isolated_before_engine_and_text_stays_immutable(reviewed, project_config):
+    sid, path, source = reviewed
+    doc = read_artifact(path)
+    doc["segments"][1]["end"] = doc["segments"][1]["start"]
+    atomic_write_json(path, seal_artifact(doc))
+    pointer = read_artifact(path.parents[1] / "latest.json")
+    pointer["artifact_checksum_of_reviewed_json"] = read_artifact(path)["artifact_checksum"]
+    atomic_write_json(path.parents[1] / "latest.json", seal_artifact(pointer))
+    baseline = {
+        p: (sha256_file(p), p.stat().st_mtime_ns) for p in (path, source, path.with_suffix(".txt"))
+    }
+
+    def positive_only(originals, unit, clip):
+        assert all(s["end"] > s["start"] for s in originals)
+        return fake_engine(originals, unit, clip)
+
+    report = a.run_alignment(
+        project_config, sid, engine_factory=lambda _: positive_only, extractor=fake_extract
+    )
+    failed = read_artifact(Path(report["aligned_json"]))["segments"][1]
+    assert report["status"] == "SUCCEEDED_WITH_WARNINGS" and report["full_alignment_complete"]
+    assert failed["start"] == failed["end"] == 100
+    assert failed["text"] == doc["segments"][1]["text"]
+    assert failed["alignment_diagnostics"]["failure_reason"] == "ZERO_DURATION_REVIEWED_SEGMENT"
+    assert all(w["start"] is None and w["end"] is None for w in failed["words"])
+    assert baseline == {p: (sha256_file(p), p.stat().st_mtime_ns) for p in baseline}
+
+
+def test_review_error_aborted_unit_never_recovers_as_lexical_warning(reviewed, project_config):
+    from session_pipeline.human_review import ReviewError
+
+    sid, _, _ = reviewed
+
+    def abort(originals, unit, clip):
+        if unit["index"] == 2:
+            raise ReviewError("zero-duration alignment segment")
+        return fake_engine(originals, unit, clip)
+
+    report = a.run_alignment(
+        project_config, sid, engine_factory=lambda _: abort, extractor=fake_extract
+    )
+    p, plan = a.make_plan(project_config, sid)
+    cp_path = a.checkpoint_path(p, plan["units"][2])
+    cp = read_artifact(cp_path)
+    assert cp["processed_audio_seconds"] == 0 and cp["failure_code"] == "ReviewError"
+    assert all(
+        s["alignment_diagnostics"]["failure_reason"] == "ENGINE_EXECUTION_FAILED"
+        for s in cp["segments"]
+    )
+    before = cp_path.read_bytes()
+    finalized = a.finalize_alignment(project_config, sid, plan_path=p)
+    assert report["failed_units"] == finalized["failed_units"] == 1
+    assert finalized["status"] == "FAILED" and finalized["aligned_json"] is None
+    assert before == cp_path.read_bytes()
+
+
+def test_quality_adapter_finalizes_persisted_partial_without_model_or_retry(
+    reviewed, project_config, monkeypatch
+):
+    from session_pipeline import workflow
+
+    sid, path, source = reviewed
+    p, _, _ = legacy_content_checkpoint(project_config, sid)
+    monkeypatch.setattr(a, "run_alignment", Mock(side_effect=AssertionError("no inference")))
+    monkeypatch.setattr(a, "make_plan", Mock(side_effect=AssertionError("no new plan")))
+    monkeypatch.setattr(a, "LocalAligner", Mock(side_effect=AssertionError("no model")))
+    adapter = workflow.LocalStages(project_config, source, sid, "auto-prefer-retry")
+    with deny_network():
+        result = adapter.alignment({"REVIEW": {"reviewed_fingerprint": path.parent.name}})
+    assert result["state"] == "SUCCEEDED_WITH_WARNINGS"
+    assert result["warning_counts"]["failed_segments"] == 1
+    assert result["warning_counts"]["unaligned_words"] == 2
+    assert Path(result["txt_path"]).is_file()
+    assert a.status_report(project_config, sid, plan_path=p)["full_alignment_complete"]
+
+
+def test_adapter_zero_duration_skips_only_that_segment_and_continues(tmp_path):
+    clip = tmp_path / "fixture.wav"
+    wav(clip, 2)
+    module = SimpleNamespace(
+        nltk_load=Mock(),
+        nltk=SimpleNamespace(download=Mock()),
+        logger=SimpleNamespace(disabled=False),
+        align=Mock(return_value={"word_segments": [{"word": "retained", "start": 1, "end": 2}]}),
+    )
+    engine = a.LocalAligner.__new__(a.LocalAligner)
+    engine.wx, engine.model, engine.metadata = module, object(), {}
+    with deny_network():
+        result = engine(
+            [seg(0, 0, "zero"), seg(1, 2, "retained")], {"decoded_interval": [0, 2]}, clip
+        )
+    assert result[0]["failure_code"] == "ZERO_DURATION_REVIEWED_SEGMENT"
+    assert result[0]["words"] == []
+    assert result[1]["words"][0]["word"] == "retained"
+    assert module.align.call_count == 1
+
+
+def test_explicit_incomplete_execution_cannot_be_promoted(reviewed, project_config):
+    sid, _, _ = reviewed
+    p, _, cp_path = legacy_content_checkpoint(project_config, sid)
+    cp = read_artifact(cp_path)
+    cp["execution_completed"] = False
+    atomic_write_json(cp_path, seal_artifact(cp))
+    before = cp_path.read_bytes()
+    report = a.finalize_alignment(project_config, sid, plan_path=p)
+    assert report["status"] == "FAILED" and report["aligned_json"] is None
+    assert cp_path.read_bytes() == before
+
+
+def test_legacy_succeeded_canonical_with_warnings_reused_byte_for_byte(reviewed, project_config):
+    sid, _, _ = reviewed
+    report = a.run_alignment(
+        project_config, sid, engine_factory=lambda _: isolated_failure, extractor=fake_extract
+    )
+    path = Path(report["aligned_json"])
+    doc = read_artifact(path)
+    doc["status"] = "SUCCEEDED"
+    atomic_write_json(path, seal_artifact(doc))
+    before = path.read_bytes(), path.stat().st_mtime_ns
+    finalized = a.finalize_alignment(project_config, sid)
+    assert finalized["status"] == "SUCCEEDED_WITH_WARNINGS"
+    assert before == (path.read_bytes(), path.stat().st_mtime_ns)
